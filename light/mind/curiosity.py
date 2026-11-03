@@ -237,9 +237,9 @@ class Curiosity:
         return float(np.exp(-d))
 
     # ---------- выбор ----------
-    def best(self, shortlist: int = 10) -> Question | None:
+    def best(self, shortlist: int = 10, verbal_only: bool = False) -> Question | None:
         """Выбрать вопрос с наибольшим ожидаемым приростом знания."""
-        qs = self.candidates()
+        qs = [q for q in self.candidates() if not (verbal_only and q.kind == "name")]
         if not qs:
             return None
         names = [q for q in qs if q.kind == "name"]

@@ -37,6 +37,9 @@ FEELINGS = ("удивление", "настороженность", "удовл�
 
 INTROSPECTIVE = {
     "why": re.compile(r"почему ты|почему так|как ты (это )?(поняла|узнала|решила|пришла|догадалась)"),
+    "mistakes": re.compile(r"в ч[её]м ты ошиб|где ты ошиб|как.. .*ошибк|ты ошибалась"),
+    "unknown": re.compile(r"чего ты не знаешь|что ты хочешь узнать|какие у тебя вопросы"),
+    "knowledge": re.compile(r"что ты знаешь|что ты поняла|чему ты (на)?училась|какие (у тебя )?выводы"),
     "feel": re.compile(r"чувству|ощуща|состояни|настроени"),
     "think": re.compile(r"о ч[её]м .*думаешь|что .*думаешь|о ч[её]м .*размышля"),
     "know": re.compile(r"знаешь ли|помнишь ли|знаешь, что"),
@@ -195,6 +198,49 @@ class SelfModel(Node):
         chain = minds[-1].last_chain
         return ("Я рассуждала так: " + " → ".join(chain) + f". Поэтому ответила: {minds[-1].last_answer}.",
                 {"chain": chain})
+
+    @staticmethod
+    def _reports(brain) -> dict:
+        merged: dict = {}
+        for n in brain.cortex:
+            if hasattr(n, "self_report"):
+                for k, v in n.self_report().items():
+                    if isinstance(v, list):
+                        merged.setdefault(k, []).extend(v)
+                    else:
+                        merged[k] = v
+        return merged
+
+    def _answer_knowledge(self, brain, snap, q):
+        r = self._reports(brain)
+        if not r:
+            return "Я пока ничего не знаю о мире — только о себе.", {"report": {}}
+        parts = [f"Мне сказали {len(r.get('знаю', []))} фактов (например: "
+                 f"{'; '.join(r.get('знаю', [])[:3])})",
+                 f"сама я вывела {len(r.get('вывела', []))} (например: {'; '.join(r.get('вывела', [])[:3])})"]
+        if r.get("законы"):
+            parts.append("открытые мной законы: " + "; ".join(r["законы"][:4]))
+        if r.get("исключения"):
+            parts.append("исключения, которые я заметила: " + "; ".join(r["исключения"][:2]))
+        if r.get("гипотезы"):
+            parts.append("мои непроверенные догадки: " + "; ".join(r["гипотезы"][:2]))
+        return ". ".join(parts) + ".", {"report": r}
+
+    def _answer_mistakes(self, brain, snap, q):
+        r = self._reports(brain)
+        errs = r.get("ошибалась", []) + r.get("опровергнуто", [])
+        text = ("Я ошибалась: " + "; ".join(errs[-4:]) + "." if errs else
+                "Пока я не знаю за собой ошибок — но это не значит, что их нет.")
+        if r.get("сомневаюсь"):
+            text += " И я не поверила на слово: " + "; ".join(r["сомневаюсь"][-2:]) + "."
+        return text, {"mistakes": errs, "doubts": r.get("сомневаюсь", [])}
+
+    def _answer_unknown(self, brain, snap, q):
+        r = self._reports(brain)
+        want = r.get("хочу узнать", [])
+        text = ("Больше всего я хочу узнать: " + "; ".join(want[:3]) + "." if want else
+                "Сейчас у меня нет вопросов, которые я считаю важными.")
+        return text, {"questions": want}
 
     def _answer_feel(self, brain, snap, q):
         fs = self.feelings(snap)

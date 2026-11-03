@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ import numpy as np
 
 from .language import NEG, Lexicon, Utterance, tokenize
 from .perception import CategoryMemory
+
+
+def _pair() -> list[int]:
+    return [0, 0]
 
 
 @dataclass
@@ -66,8 +71,8 @@ class Mind:
         self.lexicon = Lexicon()
         self.cat_obs: Counter = Counter()
         self.cat_events: dict[int, Counter] = defaultdict(Counter)
-        self.told_prop: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-        self.told_isa: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+        self.told_prop: dict[tuple[str, str], list[int]] = defaultdict(_pair)
+        self.told_isa: dict[tuple[str, str], list[int]] = defaultdict(_pair)
         self.shown_isa: Counter = Counter()
         self.sleep_every = sleep_every
         self.experiences = 0
@@ -75,6 +80,9 @@ class Mind:
         self.insights: list[str] = []     # обнаруженные исключения и противоречия
         self.growth: list[str] = []       # как росла структура
         self.episodes: list[Episode] = []  # эпизодическая память (гиппокамп)
+        self.corrections: list[str] = []   # где я ошибалась (по ответам учителя)
+        self.doubts: list[str] = []        # чему не поверила на слово
+        self._disputed: set = set()
         self._version = 0                 # меняется при любом изменении знаний
         self._cache: dict = {}
         self._noted: set = set()
@@ -113,13 +121,98 @@ class Mind:
         fe = ep.events[ep.focus] if ep.focus is not None else frozenset()
         return Utterance(tokenize(ep.text), frozenset(cats), events, fc, fe)
 
-    def _learn_now(self, tokens: tuple[str, ...]) -> None:
-        """Прямой ответ на вопрос усваивается сразу, не дожидаясь сна."""
-        f = self.lexicon.parse(tokens)
-        if f:
-            kind, x, y, pol = f
-            (self.told_prop if kind == "prop" else self.told_isa)[(x, y)][0 if pol else 1] += 1
-            self.touch()
+    def _learn_now(self, tokens: tuple[str, ...]) -> tuple | None:
+        """Сказанное усваивается сразу, не дожидаясь сна. Если это расходится с тем, что я
+        думала, — отмечаю свою ошибку (осознание собственных выводов)."""
+        f = self.lexicon.parse(tokens) or self._bootstrap(tokens)
+        if not f:
+            return None
+        kind, x, y, pol = f
+        say = lambda v: (f"{x} — это {y}" if v else f"{x} не {y}") if kind == "isa" \
+            else f"{x} {'' if v else 'не '}{y}"  # noqa: E731
+        before = self.judge(x, y) if kind == "prop" else self.judge_isa(x, y)
+        if before.value is not None and before.value != pol and before.source == "видела" \
+                and before.conf >= 0.85 and (x, y, pol) not in self._disputed:
+            # сказанное противоречит надёжному собственному наблюдению — не верю на слово
+            self._disputed.add((x, y, pol))
+            self.doubts.append(f"мне сказали «{say(pol)}», но {before.chain[0]}. "
+                               f"Это расходится с моими наблюдениями — подтвердите, пожалуйста")
+            return ("doubt",) + f[1:]
+        if before.value is not None and before.conf >= 0.5 and before.value != pol \
+                and before.source != "слышала":
+            note = " (приняла, хотя это противоречит тому, что я видела)" if before.source == "видела" else ""
+            self.corrections.append(f"я думала: {say(before.value)} ({before.source}: "
+                                    f"{'; '.join(before.chain[:2])}), а оказалось: {say(pol)}{note}")
+        (self.told_prop if kind == "prop" else self.told_isa)[(x, y)][0 if pol else 1] += 1
+        self.touch()
+        return f
+
+    def _bootstrap(self, tokens: tuple[str, ...]) -> tuple | None:
+        """Новые слова по устройству фразы (как дети): «кит это животное» — раз после «это»
+        стоит знакомое существительное, то «кит» — тоже существительное."""
+        lx = self.lexicon
+        core = [t for t in tokens if t not in lx.function or t == "это"]
+        has_eto = "это" in core
+        core = [t for t in core if t != "это"]
+        pol = True
+        if len(core) == 3 and core[1] == NEG:
+            pol, core = False, [core[0], core[2]]
+        if len(core) != 2:
+            return None
+        x, y = core
+        if has_eto or y in lx.nouns:
+            for w in (x, y):
+                if w not in lx.nouns:
+                    lx.nouns.add(w)
+                    self.growth.append(f"новое слово из текста: «{w}» — название чего-то")
+            return ("isa", x, y, pol) if x != y else None
+        if x in lx.nouns or y in lx.predicates:
+            if x not in lx.nouns:
+                lx.nouns.add(x)
+                self.growth.append(f"новое слово из текста: «{x}» — название чего-то")
+            if y not in lx.predicates:
+                lx.predicates.add(y)
+                self.growth.append(f"новое слово из текста: «{y}» — то, что делают или чем являются")
+            return ("prop", x, y, pol)
+        return None
+
+    def learn_text(self, text: str) -> list[str]:
+        """Прочитать текст (без сцены): по предложению; вернуть, что понято."""
+        out = []
+        for sent in re.split(r"[.!\n;]+", text):
+            toks = tokenize(sent)
+            if not toks:
+                continue
+            self.episodes.append(Episode([], [], sent, None))
+            self.lexicon.utts.append(Utterance(toks, frozenset(), frozenset(), None, frozenset()))
+            f = self._learn_now(toks)
+            if f and f[0] == "doubt":
+                out.append("СОМНЕВАЮСЬ: " + self.doubts[-1])
+            elif f:
+                kind, x, y, pol = f
+                out.append(f"{x} {'' if pol else 'не '}{'— это ' if kind == 'isa' else ''}{y}")
+        return out
+
+    def self_report(self) -> dict:
+        """Что я знаю, откуда, насколько уверена; где ошибалась; чего не знаю."""
+        known = []
+        for (x, y), (pos, neg) in sorted(self.told_prop.items()):
+            if pos != neg:
+                known.append(f"{x} {'' if pos > neg else 'не '}{y} — мне говорили")
+        for (x, y), (pos, neg) in sorted(self.told_isa.items()):
+            if pos > neg:
+                known.append(f"{x} — это {y} — мне говорили")
+        inferred = []
+        for x in sorted(self.lexicon.basic_nouns()):
+            for p in sorted(self.predicates()):
+                v = self.judge(x, p)
+                if v.source in ("вывод", "видела") and v.value and v.conf >= 0.75:
+                    inferred.append(f"{x} {p} — {v.source}, уверенность {v.conf:.2f}")
+        return {"знаю": known, "вывела": inferred, "гипотезы": list(self.ideas),
+                "исключения": list(self.insights), "ошибалась": list(self.corrections),
+                "сомневаюсь": list(self.doubts),
+                "рост": self.growth[-5:],
+                "категорий": len(self.perception.ids()), "слов": len(self.lexicon.nouns | self.lexicon.predicates)}
 
     def touch(self) -> None:
         """Знания изменились — забыть закэшированную структуру понятий."""

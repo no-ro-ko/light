@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from ..nodes import Node
 from ..signals import Signal
 from .curiosity import Curiosity
+from .grounding import Grounder
 from .mind import Mind
 
 if TYPE_CHECKING:
@@ -29,11 +30,16 @@ Q_ISA = re.compile(r"^\s*(\w+)\s*(?:—|-)?\s*это\s+(\w+)\s*\?\s*$")
 class MindNode(Node):
     name = "разум"
 
-    def __init__(self, mind: Mind, curiosity: Curiosity | None = None, curious: bool = True):
+    def __init__(self, mind: Mind, curiosity: Curiosity | None = None, curious: bool = True,
+                 grounder: Grounder | None = None):
         super().__init__()
         self.mind = mind
         self.curiosity = curiosity or Curiosity(mind)
         self.curious = curious
+        self.grounder = grounder or Grounder()
+        self.science: list[str] = []          # научная тетрадь: открытые законы
+        self.refuted: list[str] = []          # опровергнутые мной гипотезы
+        self.verbal_only = False              # в разговоре без общей картинки не спрашиваю «что это?»
         self.jobs: dict[int, dict] = {}
         self.last_chain: list[str] = []
         self.last_answer: str = ""
@@ -60,6 +66,8 @@ class MindNode(Node):
             q = self.parse_question(focus.text())
             if q:
                 return self._start(q, focus, brain)
+            if focus.data.get("statement"):
+                return self._statement(focus)
         if focus.source == self.name and focus.data.get("job") in self.jobs:
             return self._next(focus.data["job"], focus)
         if self.curious and focus.source == "dmn" and not brain.goals and not self.waiting_answer:
@@ -108,8 +116,47 @@ class MindNode(Node):
                        parents=[parent.id],
                        data={"answer": v.answer(), "source": v.source, "chain": j["steps"]})]
 
+    def _statement(self, focus: Signal) -> list[Signal]:
+        """Мне что-то сообщили словами: понять, запомнить, усомниться, спросить незнакомое."""
+        self.waiting_answer = False
+        text = focus.text()
+        from .grounding import stem
+        self.grounder.known |= {stem(w) for w in self.mind.lexicon.nouns | self.mind.lexicon.predicates
+                                | self.mind.lexicon.function}
+        learned = self.mind.learn_text(text)
+        n_before = len(self.grounder.journal)
+        asks = self.grounder.read(text)
+        learned += [j.removeprefix("поняла: ") for j in self.grounder.journal[n_before:]
+                    if j.startswith("поняла:")]
+        out = []
+        for item in learned:
+            if item.startswith("СОМНЕВАЮСЬ"):
+                out.append(Signal("action", item.capitalize(), self.name, salience=0.9, confidence=0.8,
+                                  parents=[focus.id], data={"doubt": True}))
+        if learned and not out:
+            out.append(Signal("action", "Понятно, запомнила: " + "; ".join(learned) + ".", self.name,
+                              salience=0.85, confidence=0.9, parents=[focus.id], data={"learned": learned}))
+        for q in asks:
+            out.append(Signal("action", "Вопрос: " + q, self.name, salience=0.85, confidence=0.9,
+                              parents=[focus.id], data={"ask_word": q}))
+        if not out:
+            out.append(Signal("action", "Я не смогла разобрать эту фразу: пока я понимаю только "
+                                        "простые утверждения вида «кит — это животное», «кит плавает», "
+                                        "«кит не летает».", self.name, salience=0.8, confidence=0.9,
+                              parents=[focus.id], data={"not_understood": True}))
+        return out
+
+    def self_report(self) -> dict:
+        r = self.mind.self_report()
+        qs = sorted(self.curiosity.candidates(), key=lambda q: -q.value)[:3]
+        r["хочу узнать"] = [f"{q.text} — потому что {q.why}" for q in qs]
+        r["хочу узнать"] += [f"что значит «{c.word}»" for c in self.grounder.concepts.values() if c.lo is None]
+        r["законы"] = list(self.science)
+        r["опровергнуто"] = list(self.refuted)
+        return r
+
     def _ask(self) -> list[Signal]:
-        q = self.curiosity.best()
+        q = self.curiosity.best(verbal_only=self.verbal_only)
         if q is None or q.value < 1.0:
             return []
         self.curiosity.mark(q)
