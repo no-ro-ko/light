@@ -38,7 +38,8 @@ CONNECTED = 0.5  # порог «синапс подключён»
 class CorticalRegion:
     def __init__(self, name: str, input_size: int, columns: int = 256, cells: int = 8,
                  active_columns: int = 12, segments: int = 8, synapses: int = 32,
-                 activation_threshold: int = 7, match_threshold: int = 4, seed: int = 0):
+                 activation_threshold: int = 7, match_threshold: int = 4, seed: int = 0,
+                 auto_grow: bool = True, max_segments: int = 32, grow_after: int = 10):
         self.name = name
         self.input_size = input_size
         self.C, self.K, self.S, self.M = columns, cells, segments, synapses
@@ -48,6 +49,12 @@ class CorticalRegion:
         self.min_match = match_threshold
         self.rng = np.random.default_rng(seed)
         self.nm = Neuromodulators()
+        # самостоятельный рост: если приходится затирать старые ветки (забывать) —
+        # клетки отращивают новые дендритные сегменты
+        self.auto_grow, self.max_segments, self.grow_after = auto_grow, max_segments, grow_after
+        self.overwrites = 0
+        self._overwrites_since_growth = 0
+        self.growth_log: list[tuple[int, int]] = []  # (такт, новое число сегментов)
 
         # L4: проксимальные синапсы. Каждая колонка «видит» ~60% входа.
         self.potential = self.rng.random((self.C, input_size)) < 0.6
@@ -166,7 +173,13 @@ class CorticalRegion:
             for cell, s in learn_segs:
                 self._adapt(cell, s, ext, pw, inc, dec, grow)
             for cell in new_segs:
-                s = int(np.argmin(self.seg_used[cell]))
+                empty = np.flatnonzero((self.seg_pre[cell] < 0).all(-1))
+                if empty.size:
+                    s = int(empty[0])
+                else:                                   # места нет — затираем самое старое
+                    s = int(np.argmin(self.seg_used[cell]))
+                    self.overwrites += 1
+                    self._overwrites_since_growth += 1
                 self.seg_pre[cell, s] = -1
                 self.seg_perm[cell, s] = 0
                 self._adapt(cell, s, ext, pw, inc, dec, grow)
@@ -180,12 +193,17 @@ class CorticalRegion:
             self._learn_proximal(cols, inp)
 
         # --- гомеостаз и нейромодуляторы ---
-        self.duty = 0.99 * self.duty + 0.01 * cols
-        self.boost = np.exp(3.0 * (self.k / self.C - self.duty))
+        if learn:
+            self.duty = 0.99 * self.duty + 0.01 * cols
+            self.boost = np.exp(3.0 * (self.k / self.C - self.duty))
         nm.noradrenaline += 0.3 * (self.anomaly - nm.noradrenaline)
         self.apical *= nm.serotonin
         nm.relax(0.05)
         nm.clamp()
+
+        if (self.auto_grow and self._overwrites_since_growth >= self.grow_after
+                and self.S < self.max_segments):
+            self.grow_segments(min(self.S, self.max_segments - self.S))
 
         self.active, self.winners, self.active_cols = active, winners, cols
         self.pooled = 0.6 * self.pooled + active
@@ -216,6 +234,16 @@ class CorticalRegion:
         delta = np.where(inp, 0.05, -0.02)
         self.ff_perm[rows] = np.clip(self.ff_perm[rows] + delta * self.potential[rows], 0, 1)
 
+    def grow_segments(self, n: int) -> None:
+        """Отрастить каждой клетке n новых дендритных сегментов (структурный рост)."""
+        self.seg_pre = np.concatenate([self.seg_pre, np.full((self.N, n, self.M), -1, np.int32)], 1)
+        self.seg_perm = np.concatenate([self.seg_perm, np.zeros((self.N, n, self.M))], 1)
+        self.seg_used = np.concatenate([self.seg_used, np.zeros((self.N, n))], 1)
+        self.S += n
+        self._overwrites_since_growth = 0
+        self.growth_log.append((self.t, self.S))
+        self._compute_segments()
+
     # ---------- порты для других областей ----------
     def output(self) -> np.ndarray:
         """L5: устойчивый выход — клетки, активные недавно."""
@@ -237,6 +265,7 @@ class CorticalRegion:
 
     def stats(self) -> dict:
         return {"синапсов": int((self.seg_pre >= 0).sum()),
+                "сегментов_на_клетку": self.S,
                 "сегментов": int((self.seg_pre >= 0).any(-1).sum()),
                 "удивление": round(self.anomaly, 2),
                 **{k: round(v, 2) for k, v in vars(self.nm).items()}}

@@ -5,7 +5,7 @@ import random
 from typing import TYPE_CHECKING
 
 from .adapters import MockAdapter, ModelAdapter
-from .signals import Signal
+from .signals import Signal, core_text
 
 if TYPE_CHECKING:
     from .brain import Brain
@@ -61,12 +61,12 @@ class Amygdala(Node):
     name = "amygdala"
 
     def appraise(self, s: Signal, goals: list[str]) -> None:
-        bonus = {"question": 0.2, "error": 0.25, "surprise": 0.25, "percept": 0.15, "action": 0.3, "plan": 0.1}.get(s.kind, 0.0)
+        bonus = {"question": 0.2, "error": 0.25, "surprise": 0.25, "self": 0.1, "percept": 0.15, "action": 0.3, "plan": 0.1}.get(s.kind, 0.0)
         text = s.text().lower()
         if any(w in text for g in goals for w in g.lower().split() if len(w) > 3):
             bonus += 0.15  # связано с текущей целью
         bonus += 0.1 * (1 - s.confidence)  # неуверенность требует внимания
-        if not goals and s.kind not in ("percept", "question", "surprise"):
+        if not goals and s.kind not in ("percept", "question", "surprise", "self"):
             bonus -= 0.25  # нет цели — «пережёвывание» затухает, остаётся место фоновым вопросам
         s.salience = max(0.0, min(1.0, s.salience + bonus))
 
@@ -93,7 +93,7 @@ class Hippocampus(Node):
         return [e for _, e in scored[:k]]
 
     def on_broadcast(self, focus, brain):
-        return [Signal("memory", f"вспомнил: {m.text()}", self.name, salience=0.4,
+        return [Signal("memory", f"вспомнил: {core_text(m.text())}", self.name, salience=0.4,
                        confidence=0.6, parents=[focus.id, m.id]) for m in self.recall(focus)]
 
     def consolidate(self, summarizer: Node) -> str | None:
@@ -167,7 +167,9 @@ class DefaultModeNetwork(Node):
         self.rng = random.Random(seed)
 
     def wander(self, brain: "Brain") -> Signal | None:
-        pool = brain.open_questions or [e.text() for e in brain.hippocampus.episodes[-20:]]
+        pool = brain.open_questions or [e.text() for e in brain.hippocampus.episodes[-20:]
+                                        if e.source != "self"]
+        pool = [p for p in pool if not brain.workspace.is_inhibited(p)]  # схема внимания
         if not pool:
             return None
         seed_text = self.rng.choice(pool)
@@ -181,5 +183,8 @@ class MotorCortex(Node):
     instruction = "Сформулируй окончательный ответ пользователю ясно и кратко."
 
     def act(self, action: Signal) -> Signal:
-        return Signal("output", self.think([action]), self.name, confidence=action.confidence,
-                      parents=[action.id])
+        # самоотчёт выдаётся дословно: его смысл — точность, а не красота
+        text = action.text() if action.source == "self" or isinstance(self.adapter, MockAdapter) \
+            else self.think([action])
+        return Signal("output", text, self.name, confidence=action.confidence,
+                      parents=[action.id], data=action.data)

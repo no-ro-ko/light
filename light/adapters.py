@@ -11,7 +11,7 @@ import os
 import urllib.request
 from typing import Protocol
 
-from .signals import Signal
+from .signals import Signal, core_text
 
 
 class ModelAdapter(Protocol):
@@ -25,7 +25,7 @@ class MockAdapter:
         self.role = role
 
     def run(self, instruction: str, inputs: list[Signal]) -> str:
-        last = inputs[-1].text() if inputs else ""
+        last = core_text(inputs[-1].text()) if inputs else ""
         short = last if len(last) <= 80 else last[:77] + "..."
         return f"{self.role}: {short}"
 

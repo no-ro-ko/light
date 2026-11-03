@@ -6,6 +6,7 @@ from typing import Callable
 from .nodes import (Amygdala, AssociationCortex, AuditoryCortex, Critic, DefaultModeNetwork,
                     Hippocampus, LanguageCortex, MotorCortex, Node, PrefrontalCortex, SensoryNode,
                     VisualCortex)
+from .self_model import SelfModel
 from .signals import Signal
 from .workspace import Workspace
 
@@ -13,7 +14,7 @@ from .workspace import Workspace
 class Brain:
     def __init__(self, capacity: int = 2, answer_threshold: float = 0.7,
                  sleep_every: int = 10, gate: Callable[[Signal], bool] | None = None,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, self_aware: bool = True):
         self.workspace = Workspace(capacity)
         self.sensory: dict[str, SensoryNode] = {
             n.modality: n for n in (VisualCortex(), AuditoryCortex(), LanguageCortex())}
@@ -22,6 +23,9 @@ class Brain:
         self.dmn = DefaultModeNetwork()
         self.motor = MotorCortex()
         self.cortex: list[Node] = [self.hippocampus, AssociationCortex(), PrefrontalCortex(), Critic()]
+        self.self_model: SelfModel | None = SelfModel() if self_aware else None
+        if self.self_model:
+            self.cortex.append(self.self_model)
         self.goals: list[str] = []
         self.open_questions: list[str] = []
         self.inbox: list[Signal] = []
@@ -49,6 +53,8 @@ class Brain:
     def hear(self, content, modality: str = "text", goal: bool = True) -> None:
         raw = Signal("percept", content, "world", modality=modality)
         self.inbox.append(raw)
+        if self.self_model and modality == "text" and self.self_model.is_introspective(str(content)):
+            goal = False  # на вопрос о себе отвечают наблюдением за собой, а не обдумыванием
         if goal and modality == "text":
             self.goal_start = len(self.workspace.stream)
             self.goals.append(str(content))
@@ -94,6 +100,8 @@ class Brain:
                 continue
             for node in self.cortex:        # 5. рассылка всем узлам
                 produced.extend(node.on_broadcast(focus, self))
+        if self.self_model:                 # я-модель наблюдает такт целиком
+            produced.extend(self.self_model.observe(self, winners))
         self.workspace.propose(produced)
         # сон
         if self.sleep_every and self.ticks % self.sleep_every == 0:
@@ -103,6 +111,10 @@ class Brain:
             for n in self.cortex:
                 if hasattr(n, "sleep"):
                     self.log(f"  [сон] {n.sleep(self.hippocampus.episodes[-20:])}")
+            if self.self_model:
+                thr = self.self_model.self_test(self)
+                if thr is not None:
+                    self.log(f"  [сон] самопроверка памяти: порог «знаю» = {thr:.2f}")
         return winners
 
     def run(self, max_ticks: int = 20, stop_on_output: bool = False) -> list[Signal]:
