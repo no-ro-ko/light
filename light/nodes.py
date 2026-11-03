@@ -61,12 +61,12 @@ class Amygdala(Node):
     name = "amygdala"
 
     def appraise(self, s: Signal, goals: list[str]) -> None:
-        bonus = {"question": 0.2, "error": 0.25, "percept": 0.15, "action": 0.3, "plan": 0.1}.get(s.kind, 0.0)
+        bonus = {"question": 0.2, "error": 0.25, "surprise": 0.25, "percept": 0.15, "action": 0.3, "plan": 0.1}.get(s.kind, 0.0)
         text = s.text().lower()
         if any(w in text for g in goals for w in g.lower().split() if len(w) > 3):
             bonus += 0.15  # связано с текущей целью
         bonus += 0.1 * (1 - s.confidence)  # неуверенность требует внимания
-        if not goals and s.kind not in ("percept", "question"):
+        if not goals and s.kind not in ("percept", "question", "surprise"):
             bonus -= 0.25  # нет цели — «пережёвывание» затухает, остаётся место фоновым вопросам
         s.salience = max(0.0, min(1.0, s.salience + bonus))
 
@@ -132,7 +132,7 @@ class PrefrontalCortex(Node):
             return []
         goals = [Signal("plan", g, "goals") for g in brain.goals]
         step = self.think(goals + brain.workspace.recent(6))
-        depth = sum(1 for s in brain.workspace.stream if s.source == self.name)
+        depth = sum(1 for s in brain.workspace.stream[brain.goal_start:] if s.source == self.name)
         # уверенность растёт с проработкой и падает при ошибках критика
         errors = sum(1 for s in brain.workspace.recent(4) if s.kind == "error")
         conf = min(0.95, 0.3 + 0.15 * depth - 0.2 * errors)

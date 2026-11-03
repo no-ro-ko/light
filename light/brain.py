@@ -31,6 +31,7 @@ class Brain:
         self.gate = gate or (lambda s: True)  # базальные ганглии: разрешить действие?
         self.log = log
         self.ticks = 0
+        self.goal_start = 0  # с какого места потока идёт работа над текущей целью
 
     # --- доступ к узлам для подключения моделей ---
     def node(self, name: str) -> Node:
@@ -39,11 +40,17 @@ class Brain:
                 return n
         raise KeyError(name)
 
+    def attach(self, node: Node) -> Node:
+        """Подключить новый отдел (например, корковую сеть light.cortex.CorticalNode)."""
+        self.cortex.append(node)
+        return node
+
     # --- вход ---
     def hear(self, content, modality: str = "text", goal: bool = True) -> None:
         raw = Signal("percept", content, "world", modality=modality)
         self.inbox.append(raw)
         if goal and modality == "text":
+            self.goal_start = len(self.workspace.stream)
             self.goals.append(str(content))
             self.open_questions.append(str(content))
 
@@ -64,6 +71,12 @@ class Brain:
             self.amygdala.appraise(s, self.goals)
         # 4. конкуренция за сцену
         winners = self.workspace.select()
+        if not winners:  # остатки мыслей угасли — шанс фоновому режиму
+            spontaneous = self.dmn.wander(self)
+            if spontaneous:
+                self.amygdala.appraise(spontaneous, self.goals)
+                self.workspace.propose([spontaneous])
+                winners = self.workspace.select()
         produced: list[Signal] = []
         for focus in winners:
             self.log(f"  [сцена] {focus}")
@@ -73,6 +86,9 @@ class Brain:
                     out = self.motor.act(focus)
                     self.outputs.append(out)
                     self.log(f"  [ВЫХОД] {out.text()}")
+                    for n in self.cortex:  # дофамин: ответ состоялся
+                        if hasattr(n, "reward"):
+                            n.reward(0.3)
                     self.goals.clear()
                     self.open_questions.clear()
                 continue
@@ -84,6 +100,9 @@ class Brain:
             fact = self.hippocampus.consolidate(self.node("association"))
             if fact:
                 self.log(f"  [сон] консолидировано: {fact}")
+            for n in self.cortex:
+                if hasattr(n, "sleep"):
+                    self.log(f"  [сон] {n.sleep(self.hippocampus.episodes[-20:])}")
         return winners
 
     def run(self, max_ticks: int = 20, stop_on_output: bool = False) -> list[Signal]:

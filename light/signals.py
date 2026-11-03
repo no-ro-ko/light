@@ -8,7 +8,7 @@ from typing import Any
 
 _ids = itertools.count(1)
 
-KINDS = {"percept", "thought", "memory", "question", "plan", "error", "action", "emotion", "output"}
+KINDS = {"percept", "thought", "memory", "question", "plan", "error", "action", "emotion", "output", "surprise"}
 
 
 @dataclass
