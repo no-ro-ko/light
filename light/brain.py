@@ -36,6 +36,7 @@ class Brain:
         self.log = log
         self.ticks = 0
         self.goal_start = 0  # с какого места потока идёт работа над текущей целью
+        self.last_scene: list | None = None
 
     # --- доступ к узлам для подключения моделей ---
     def node(self, name: str) -> Node:
@@ -50,8 +51,14 @@ class Brain:
         return node
 
     # --- вход ---
-    def hear(self, content, modality: str = "text", goal: bool = True) -> None:
+    def hear(self, content, modality: str = "text", goal: bool = True,
+             scene: list | None = None, point: int | None = None) -> None:
+        """Услышать фразу (и, если передана сцена, увидеть её: [(облик, события), ...];
+        point — на какой объект показали)."""
         raw = Signal("percept", content, "world", modality=modality)
+        if scene is not None:
+            raw.data.update(scene=scene, focus=point, utterance=str(content))
+            self.last_scene = scene
         self.inbox.append(raw)
         if self.self_model and modality == "text" and self.self_model.is_introspective(str(content)):
             goal = False  # на вопрос о себе отвечают наблюдением за собой, а не обдумыванием

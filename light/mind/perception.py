@@ -52,10 +52,14 @@ class CategoryMemory:
         w = np.where(diff < 0, 0.35, 1.0)
         return float(np.sqrt((w * diff ** 2).sum()))
 
+    def radius_of(self, i: int) -> float:
+        """Пока примеров мало, представление о категории размыто — границы шире."""
+        return self.radius * (1 + 0.6 / np.sqrt(self.counts[i]))
+
     def categorize(self, x: np.ndarray, learn: bool = True) -> tuple[int, bool]:
         """→ (категория, создана ли новая)."""
         i, d = self.nearest(x)
-        if i is not None and d <= self.radius:
+        if i is not None and d <= self.radius_of(i):
             if learn:
                 self.counts[i] += 1
                 rate = max(1.0 / self.counts[i], 0.02)

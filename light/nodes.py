@@ -37,7 +37,8 @@ class SensoryNode(Node):
             desc = raw.text()
         else:
             desc = self.think([raw])
-        return Signal("percept", desc, self.name, salience=0.7, confidence=0.8, parents=[raw.id])
+        return Signal("percept", desc, self.name, salience=0.7, confidence=0.8, parents=[raw.id],
+                      data=dict(raw.data))
 
 
 class VisualCortex(SensoryNode):

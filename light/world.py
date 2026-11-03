@@ -22,7 +22,8 @@ import numpy as np
 
 LOOK = ["размер", "четыре_ноги", "две_ноги", "шерсть", "перья", "чешуя", "крылья", "клюв",
         "плавники", "висячие_уши", "усы", "рога", "вымя", "лицо", "одежда", "ствол", "листья",
-        "лепестки", "круглый", "колёса", "черенок", "чёрно_белый"]
+        "лепестки", "круглый", "колёса", "черенок", "чёрно_белый", "большие_глаза",
+        "перьевые_ушки"]
 
 EVENTS = ["звук_гав", "звук_мяу", "звук_му", "звук_чирик", "речь", "в_воздухе", "в_воде",
           "катится", "едет", "звук_уху"]
@@ -45,7 +46,8 @@ KINDS: dict[str, tuple[dict[str, float], dict[str, float]]] = {
     "машинка": ({"размер": .15, "колёса": 1}, {"едет": .5}),
     "яблоко": ({"размер": .05, "круглый": .8, "черенок": 1}, {}),
     # вид, которого нет в обычной жизни системы, — для проверки встречи с неизвестным
-    "сова": ({"размер": .2, "две_ноги": 1, "перья": 1, "крылья": 1, "клюв": 1},
+    "сова": ({"размер": .3, "две_ноги": 1, "перья": 1, "крылья": 1, "клюв": 1,
+              "большие_глаза": 1, "перьевые_ушки": 1},
              {"в_воздухе": .5, "звук_уху": .5}),
 }
 EVERYDAY = [k for k in KINDS if k != "сова"]
@@ -192,11 +194,18 @@ class Nursery:
             name = self.rng.choice(ups)
         return scene, f"{self.rng.choice(FRAMES)} {name}", point
 
+    def recognize(self, look: np.ndarray) -> Obj:
+        """Родитель узнаёт, на что показывает ребёнок."""
+        protos = {k: np.array([KINDS[k][0].get(f, 0.0) for f in LOOK]) for k in KINDS}
+        kind = min(protos, key=lambda k: np.linalg.norm(protos[k] - look))
+        return Obj(kind, look, set())
+
     # ---------- ответы на вопросы ребёнка ----------
     def answer(self, q: dict) -> tuple[list[Obj], str]:
         """q: {"type": "name", "obj": Obj} | {"type": "prop", "x", "p"} | {"type": "isa", "x", "y"}."""
         if q["type"] == "name":
-            return [q["obj"]], f"это {q['obj'].kind}"
+            obj = q.get("obj") or self.recognize(q["look"])
+            return [obj], f"это {obj.kind}"
         x = q["x"]
         if x not in KINDS and x not in SUPERS:
             return [], "не знаю такого"
@@ -208,5 +217,5 @@ class Nursery:
             return [], f"да {x} это {q['y']}" if v else f"нет {x} не {q['y']}"
         if q["type"] == "parent":                         # «кто такой x?»
             ps = ISA.get(x)
-            return [], f"{x} это {ps[0]}" if ps else f"{x} это {x}"
+            return [], f"{x} это {ps[0]}" if ps else "это просто " + x
         return [], "не понимаю"

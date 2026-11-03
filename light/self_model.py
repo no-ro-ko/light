@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 FEELINGS = ("удивление", "настороженность", "удовлетворение", "неуверенность", "спокойствие")
 
 INTROSPECTIVE = {
+    "why": re.compile(r"почему ты|почему так|как ты (это )?(поняла|узнала|решила|пришла|догадалась)"),
     "feel": re.compile(r"чувству|ощуща|состояни|настроени"),
     "think": re.compile(r"о ч[её]м .*думаешь|что .*думаешь|о ч[её]м .*размышля"),
     "know": re.compile(r"знаешь ли|помнишь ли|знаешь, что"),
@@ -185,6 +186,15 @@ class SelfModel(Node):
         data.update(question=kind, introspective=True)
         return [Signal("action", text, self.name, salience=0.9, confidence=0.9,
                        parents=[focus.id], data=data)]
+
+    def _answer_why(self, brain, snap, q):
+        """Отчёт о собственном рассуждении — по сохранённой цепочке, а не придуманный заново."""
+        minds = [n for n in brain.cortex if getattr(n, "last_chain", None)]
+        if not minds:
+            return "Я ещё ни о чём не рассуждала.", {"chain": []}
+        chain = minds[-1].last_chain
+        return ("Я рассуждала так: " + " → ".join(chain) + f". Поэтому ответила: {minds[-1].last_answer}.",
+                {"chain": chain})
 
     def _answer_feel(self, brain, snap, q):
         fs = self.feelings(snap)

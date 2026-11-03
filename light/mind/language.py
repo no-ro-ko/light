@@ -238,7 +238,7 @@ class Lexicon:
             subj = [c for i in idx for t in self.utts[i].tokens if t in basic
                     for c in basic[t] & self.utts[i].cats]
             usual = [with_ce[(c, e)] / with_c[c] for c in subj if with_c[c] >= 5]
-            if usual and share < sum(usual) / len(usual) + 0.25:
+            if usual and share < sum(usual) / len(usual) + 0.25 and share < 0.9:
                 continue
             self.event_of[w] = e
 

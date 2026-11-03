@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -74,6 +75,8 @@ class Mind:
         self.insights: list[str] = []     # обнаруженные исключения и противоречия
         self.growth: list[str] = []       # как росла структура
         self.episodes: list[Episode] = []  # эпизодическая память (гиппокамп)
+        self._version = 0                 # меняется при любом изменении знаний
+        self._cache: dict = {}
         self._noted: set = set()
 
     # ================= опыт =================
@@ -96,6 +99,8 @@ class Mind:
             self.lexicon.utts.append(u)
             if not scene:
                 self._learn_now(u.tokens)
+            elif len(scene) == 1 and focus == 0:
+                self._fast_map(u.tokens, cats[0])
         self.experiences += 1
         if self.sleep_every and self.experiences % self.sleep_every == 0:
             self.sleep()
@@ -114,6 +119,44 @@ class Mind:
         if f:
             kind, x, y, pol = f
             (self.told_prop if kind == "prop" else self.told_isa)[(x, y)][0 if pol else 1] += 1
+            self.touch()
+
+    def touch(self) -> None:
+        """Знания изменились — забыть закэшированную структуру понятий."""
+        self._version += 1
+        self._cache.clear()
+
+    @contextmanager
+    def supposing(self, kind: str, x: str, y: str, value: bool):
+        """Мысленный эксперимент: «а что, если бы мне сказали, что …»."""
+        table = self.told_prop if kind == "prop" else self.told_isa
+        old = list(table[(x, y)]) if (x, y) in table else None
+        table[(x, y)] = [1, 0] if value else [0, 1]
+        self.touch()
+        try:
+            yield
+        finally:
+            if old is None:
+                del table[(x, y)]
+            else:
+                table[(x, y)] = old
+            self.touch()
+
+    def _fast_map(self, tokens: tuple[str, ...], c: int) -> None:
+        """Быстрое запоминание: один раз показали безымянную вещь и назвали — запомнила."""
+        lx = self.lexicon
+        core = [t for t in tokens if t not in lx.function]
+        if len(core) == 1 and c not in lx.name_of and core[0] not in lx.function:
+            w = core[0]
+            lx.nouns.add(w)
+            if lx.ext.get(w):                       # знакомое слово: значение расширяется
+                lx.ext[w] = lx.ext[w] + [c]
+            else:
+                lx.ext[w], lx.coverage[w] = [c], 1.0
+            lx.name_of[c] = w
+            self.perception.pinned.add(c)
+            self.growth.append(f"опыт {self.experiences}: новое слово «{w}» с одного раза")
+            self.touch()
 
     def _replay(self) -> None:
         """Прокрутить всю эпизодическую память заново — уже с нынешними понятиями."""
@@ -182,6 +225,7 @@ class Mind:
         self.told_prop.clear()
         self.told_isa.clear()
         self.shown_isa.clear()
+        self.touch()
         basic = lx.basic_nouns()
         for u in lx.utts:
             f = lx.parse(u.tokens)
@@ -204,6 +248,12 @@ class Mind:
 
     def parents(self, x: str) -> list[tuple[str, str, float]]:
         """(род, откуда я это знаю, уверенность)."""
+        key = ("parents", x)
+        if key not in self._cache:
+            self._cache[key] = self._parents(x)
+        return self._cache[key]
+
+    def _parents(self, x: str) -> list[tuple[str, str, float]]:
         out: dict[str, tuple[str, float]] = {}
         for (a, b), (pos, neg) in self.told_isa.items():
             if a == x and pos > neg:
@@ -220,7 +270,13 @@ class Mind:
         return [(y, how, c) for y, (how, c) in out.items()]
 
     def children(self, y: str) -> list[str]:
-        return [x for x in self.nouns() if any(p == y for p, _, _ in self.parents(x))]
+        if "children" not in self._cache:
+            kids: dict[str, list[str]] = defaultdict(list)
+            for x in sorted(self.nouns()):
+                for p, _, _ in self.parents(x):
+                    kids[p].append(x)
+            self._cache["children"] = kids
+        return self._cache["children"].get(y, [])
 
     def descendants(self, y: str) -> set[str]:
         out, todo = set(), [y]
@@ -325,6 +381,18 @@ class Mind:
             return Verdict(v, min(0.8, 0.5 + 0.1 * len(kids)),
                            [f"все известные мне «{x}» ({names}) — «{_neg(v)}{p}»",
                             f"наверное, все «{x}» — «{_neg(v)}{p}»"], "гипотеза")
+        if len(kids) >= 3:
+            # «в основном»: обычно живые не плавают — кроме рыб и пингвинов
+            yes = [k for k, v in kids if v.value]
+            no = [k for k, v in kids if not v.value]
+            major, minor = (yes, no) if len(yes) > len(no) else (no, yes)
+            share = len(major) / len(kids)
+            if share >= 0.75:
+                v = bool(major is yes)
+                return Verdict(v, 0.5 + 0.3 * share,
+                               [f"из известных мне «{x}» {len(major)} из {len(kids)} — «{_neg(v)}{p}» "
+                                f"(кроме: {', '.join(minor)})",
+                                f"обычно «{x}» — «{_neg(v)}{p}»"], "гипотеза")
         for y, _, _ in self.parents(x):
             all_sibs = [k for k in self.children(y) if k != x]
             sibs = [(k, self.direct(k, p)) for k in all_sibs]
@@ -356,10 +424,21 @@ class Mind:
                     chain = [f"{a} — это {b} ({how})" for a, b, how, _ in path]
                     return Verdict(True, conf, chain + [f"значит, {x} — это {y}"],
                                    "слышала" if len(path) == 1 and path[0][2] == "мне говорили" else "вывод")
+        members = [k for k in self.children(x) if self.reaches(k, y)]
+        if members:
+            # догадка о строении мира: «все известные мне птицы — животные»
+            others = [k for k in self.children(x) if k not in members and self.well_known(k)]
+            if len(members) >= len(others):
+                return Verdict(True, 0.6 + 0.05 * min(len(members), 4),
+                               [f"известные мне «{x}» ({', '.join(members)}) — это «{y}»",
+                                f"наверное, и «{x}» — это «{y}»"], "гипотеза")
         if self.well_known(x) and self.children(y):
             return Verdict(False, 0.6, [f"я не знаю, чтобы {x} был(а) {y}: среди {y} я знаю "
                                         f"{', '.join(sorted(self.children(y))[:4])}"], "по умолчанию")
         return Verdict(None, 0.0, [f"я не знаю, {y} ли {x}"], "не знаю")
+
+    def reaches(self, x: str, y: str) -> bool:
+        return any(node == y for level in self.ancestors(x) for node, _ in level)
 
     def ask(self, x: str, y: str) -> Verdict:
         """Универсальный вопрос: y — род (существительное) или свойство (сказуемое)."""
@@ -367,19 +446,24 @@ class Mind:
 
     # ================= узнавание =================
     def identify(self, look: np.ndarray) -> tuple[str | None, str | None, float]:
-        """→ (имя, если знаю; на что похоже, если не знаю; насколько похоже)."""
+        """→ (имя, если знаю; на что похоже, если не знаю; насколько похоже).
+
+        Похожесть «на что-то знакомое» мягче, чем порог «это оно самое»."""
         c, d = self.perception.nearest(look)
         if c is None:
             return None, None, 0.0
-        if d <= self.perception.radius or \
-                self.perception.partial_distance(look, self.perception.prototype(c)) <= self.perception.radius:
+        sure = d <= self.perception.radius or \
+            self.perception.partial_distance(look, self.perception.prototype(c)) <= self.perception.radius
+        if not sure and d <= 1.6 * self.perception.radius and self.lexicon.name_of.get(c):
+            return self.lexicon.name_of[c], None, float(np.exp(-d))     # «наверное, это …»
+        if sure:
             name = self.lexicon.name_of.get(c)
             if name:
                 return name, None, self.perception.similarity(d)
             c2, d2 = self.nearest_named(self.perception.prototype(c), exclude={c})
-            return None, self.lexicon.name_of.get(c2), self.perception.similarity(d2)
+            return None, self.lexicon.name_of.get(c2), float(np.exp(-d2))
         c2, d2 = self.nearest_named(look)
-        return None, self.lexicon.name_of.get(c2), self.perception.similarity(d2)
+        return None, self.lexicon.name_of.get(c2), float(np.exp(-d2))
 
     def nearest_named(self, x: np.ndarray, exclude=frozenset()) -> tuple[int | None, float]:
         named = {c for c in self.lexicon.name_of if c not in exclude and self.perception.alive[c]}
@@ -394,14 +478,19 @@ class Mind:
         name, like, sim = self.identify(look)
         if name:
             v = self.judge(name, p) if p not in self.nouns() else self.judge_isa(name, p)
-            v.chain = [f"это {name} (узнала по виду)"] + v.chain
+            if sim >= 0.4:
+                v.chain = [f"это {name} (узнала по виду)"] + v.chain
+            else:
+                v.chain = [f"наверное, это {name} (похоже, но не совсем)"] + v.chain
+                v.conf *= 0.8
+                v.source = "гипотеза"
             return v
         if like:
             # не знаю, что это, но похоже на like: переносим то, что верно для его рода
             for y, how, c in self.parents(like):
                 v = self.judge(y, p) if p not in self.nouns() else self.judge_isa(y, p)
                 if v.value is not None:
-                    return Verdict(v.value, min(v.conf, 0.65) * max(sim, 0.5),
+                    return Verdict(v.value, min(v.conf, 0.75) * (0.7 + 0.3 * sim),
                                    [f"я не знаю, что это, но оно похоже на {like} (сходство {sim:.2f})",
                                     f"{like} — это {y}; наверное, и это — {y}"] + v.chain, "гипотеза")
         return Verdict(None, 0.0, ["я не знаю, что это"], "не знаю")

@@ -8,4 +8,5 @@
 - Собственная корковая нейросеть CLN (колонки, слои, нейромодуляторы, сон): [docs/CORTEX.md](docs/CORTEX.md)
 - Демо на заглушках: `python3 examples/demo.py`
 - Демо с корой: `python3 examples/cortex_demo.py` (нужен `numpy`)
+- «Детский» разум: учится в синтетическом мире без меток (категории, слова, знания), рассуждает с объяснениями, находит исключения, сам задаёт вопросы: `light/mind/`, мир — `light/world.py`
 - Тесты: `python3 -m unittest discover tests`
