@@ -38,9 +38,9 @@ def grow(skip=(), extra=()):
 class LiteraryFable(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.o = grow(skip=("04", "14"))
+        cls.o = grow(skip=("04", "05", "14", "15", "16"))         # только литературный пересказ (13)
         a = cls.o.answer
-        cls.before = {"tell": a("Перескажи рассказ"), "why": a("Зачем лиса хвалила ворону?"),
+        cls.before = {"tell": a("Перескажи басню"), "why": a("Зачем лиса хвалила ворону?"),
                       "questions": " ".join(cls.o.my_questions())}
         p = CUR / "14_слова.txt"                                   # ответы на её вопросы
         cls.o.read(p.name, p.read_text(encoding="utf-8"))
@@ -144,13 +144,33 @@ class UnseenStories(unittest.TestCase):
         self.assertGreaterEqual(ok, 6)
 
 
-class KrylovHonestly(unittest.TestCase):
-    def test_original_is_not_understood(self):
-        o = grow(skip=("04", "13"))                  # только оригинал Крылова (и словарь)
+class KrylovOriginal(unittest.TestCase):
+    """Сам оригинал Крылова — без обоих пересказов (04, 13). Уроки 15 (как звучат похвала и просьба,
+    «пленил — значит хочет» на других героях) и 16 (ответы на её вопросы о словах басни) — нужны;
+    без них не понимает. Мотив ни в одном уроке не написан."""
+
+    def test_without_lessons_not_understood(self):
+        o = grow(skip=("04", "13", "15", "16"))
         self.assertFalse(o.answer("Зачем лиса хвалила ворону?").startswith("Чтобы"))
+
+    def test_with_lessons_understood(self):
+        o = grow(skip=("04", "13"))
+        a = o.answer("Зачем лиса хвалила ворону?")
+        print("\n  Крылов, зачем:", a)
+        self.assertTrue(a.startswith("Чтобы получить сыр"), a)
+        self.assertIn("05_басня_крылов", a)
+        self.assertIn("по словам", a)                              # похвала понята по речи лисы
+        self.assertIn("пленил", a)                                 # желание — из «Лисицу сыр пленил»
+        why = o.answer("Почему сыр выпал?")
+        self.assertIn("ворона держит сыр", why)                    # «а сыр во рту держала» — ворона
+        self.assertIn("наверное", why)                             # пропущенный шаг достроен правилами
+        self.assertIn("сыр падает", o.answer("Что было бы, если бы лиса не хвалила ворону?"))
+        self.assertTrue(o.answer("Обманула ли лиса ворону?").startswith("Похоже, да"))
+        tell = o.answer("Перескажи басню")
+        for ev in ("лиса хочет сыр", "лиса хвалит", "лиса просит", "ворона поёт"):
+            self.assertIn(ev, tell)
         st = o.files["05_басня_крылов.txt"]
-        print(f"\n  Крылов: события нашла в {st['понято']} строках из {st['предложений']}")
-        self.assertLess(st["понято"], st["предложений"])
+        print(f"  Крылов: события нашла в {st['понято']} строках из {st['предложений']}")
 
 
 if __name__ == "__main__":

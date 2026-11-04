@@ -111,8 +111,11 @@ class RuleField:
     def read(self, sentences: list[str]) -> list[Ev]:
         return self.read_events([e for e in (self.parse(s) for s in sentences) if e])
 
-    def read_events(self, story: list[Ev]) -> list[Ev]:
+    def read_events(self, story: list[Ev], complete: bool = True) -> list[Ev]:
+        """complete: история рассказана целиком (простые фразы) — чего нет, того и не было; в обычном
+        повествовании многое опущено."""
         self.stories.append(story)
+        self.__dict__.setdefault("complete", []).append(complete)
         for t in range(1, len(story)):
             r = self._abstract(story[:t], story[t])
             if r:
@@ -122,11 +125,11 @@ class RuleField:
                     self.journal.append(f"[история {len(self.stories)}] выросло правило: {r.text()}")
         return story
 
-    def rebuild(self, stories: list[list[Ev]]) -> None:
+    def rebuild(self, stories: list[list[Ev]], complete: list[bool] | None = None) -> None:
         """Истории перечитаны заново (с выросшим языком): опыт пересчитать, выращенное — сохранить."""
-        self.stories, self.seen = [], Counter()
-        for st in stories:
-            self.read_events(st)
+        self.stories, self.seen, self.complete = [], Counter(), []
+        for k, st in enumerate(stories):
+            self.read_events(st, complete[k] if complete else True)
 
     @staticmethod
     def _abstract(before: list[Ev], effect: Ev) -> Rule | None:
@@ -181,14 +184,24 @@ class RuleField:
         return p in st[t + 1:t + 1 + getattr(self, "horizon", 1)]
 
     def check(self, rule: Rule, stories: list[list[Ev]] | None = None) -> tuple[int, int]:
-        """Самопроверка правила на памяти историй: (сколько раз было применимо, сколько сбылось)."""
+        """Самопроверка правила на памяти историй: (сколько раз было применимо, сколько сбылось).
+        Если о том, про кого предсказание, дальше в рассказе вообще ничего нет («похвалила… —
+        вскружилась голова»), это не промах: не видно, сбылось ли. Промах — когда он на сцене и
+        делает другое («папа держит газету» → не «поёт», а «читает»)."""
         applicable = hit = 0
-        for st in stories if stories is not None else self.stories:
+        h = getattr(self, "horizon", 1)
+        pool = stories if stories is not None else self.stories
+        whole = [True] * len(pool) if stories is not None else (getattr(self, "complete", []) + [True] * len(pool))
+        for st, full in zip(pool, whole):
             for t in range(len(st)):
                 p = self.fire(rule, st[t], st[:t])
-                if p is not None:
+                if p is None:
+                    continue
+                if self.came_true(st, t, p):
                     applicable += 1
-                    hit += self.came_true(st, t, p)
+                    hit += 1
+                elif full or any(p.agent == e.agent for e in st[t + 1:t + 1 + h]):
+                    applicable += 1                   # он сам действует — и не так, как предсказано
         return applicable, hit
 
     def predict(self, prefix: list[Ev]) -> tuple[Ev | None, Rule | None]:
@@ -204,6 +217,15 @@ class RuleField:
     # ---------- сон: самопроверка, уточнение, отказ ----------
     def sleep(self) -> list[str]:
         notes = []
+        for rule in sorted(self.retired, key=lambda r: r.text()):   # пересмотреть отвергнутое: может,
+            if self.seen.get(rule, 0) < self.min_support:            # теперь, с новыми знаниями, сбывается
+                continue
+            n, k = self.check(rule)
+            if n and k / n >= self.trust:
+                self.retired.discard(rule)
+                self.rules[rule] = {"born": len(self.stories), "надёжность": k / n}
+                notes.append(f"вернула правило «{rule.text()}»: теперь сбывается {k} из {n} — "
+                             f"раньше я от него отказалась зря")
         for rule in list(self.rules):
             n, k = self.check(rule)
             rel = k / n if n else 0.0
@@ -358,11 +380,28 @@ def why_happened(field: RuleField, story: list[Ev], agent: str, action: str) -> 
             if found:
                 break
         if not found:
-            break
+            bridge = _bridge(field, before, cur)
+            if bridge is None:
+                break
+            prev, steps = bridge                 # шага между ними в рассказе нет — достраиваю правилами
+            causes.append(f"{say(cur, field)} — наверное, потому что {say(prev, field)}: от этого "
+                          + " → ".join(say(e, field) for e in steps + [cur]))
+            cur = prev
+            continue
         causes.append(f"{say(cur, field)} — потому что {say(found[0], field)}"
                       + (f", а {say(found[1], field)}" if found[1] else ""))
         cur = found[0]
     return ("; ".join(causes) + f". А началось всё с того, что {say(cur, field)}") if causes else "не вижу причины"
+
+
+def _bridge(field: RuleField, before: list[Ev], cur: Ev, depth: int = 3):
+    """Событие не следует прямо из предыдущих — но, может быть, через шаг, о котором в рассказе не
+    сказано («от похвалы радуются, а кто радуется — поёт»)? → (откуда, [пропущенные шаги]) или None."""
+    for k in range(len(before) - 1, -1, -1):
+        chain = [e for e, _ in consequences(field, before[k], before[:k], depth=depth)]
+        if cur in chain:
+            return before[k], chain[:chain.index(cur)]
+    return None
 
 
 def what_if_not(field: RuleField, story: list[Ev], agent: str, action: str) -> str:
@@ -372,6 +411,7 @@ def what_if_not(field: RuleField, story: list[Ev], agent: str, action: str) -> s
     h = getattr(field, "horizon", 1)
     derived = {e for i, e in enumerate(story) for j in range(max(0, i - h), i)
                if any(RuleField.fire(r, story[j], story[:j]) == e for r in field.rules)}
+    derived |= {e for i, e in enumerate(story) if e not in derived and _bridge(field, story[:i], e)}
     roots = [e for e in story if e not in derived and e != removed]
     world = list(roots)
     for r in roots:
