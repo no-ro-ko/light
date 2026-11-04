@@ -65,7 +65,7 @@ class FromScratch(unittest.TestCase):
                 print("\n  ✗", q, "→", a[:150])
         print(f"\n  экзамен по невыписанным фактам: {ok}/{len(EXAM)}")
         self.assertGreaterEqual(ok, len(EXAM) - 1)
-        self.assertIn("млекопитающ", self.org.answer("Дышит ли кит?"))   # цепочка через новый оборот
+        self.assertIn("млекопитающ", self.org.answer("Дышит ли дельфин?"))   # цепочка через новый оборот
 
     def test_story_meaning(self):
         o = self.org

@@ -68,6 +68,12 @@ class TextLanguage:
         self._singles: set[str] = set()
         self._guess: dict[str, str] = {}
         self.first: Counter = Counter()               # сколько раз форма открывала фразу
+        # подсказки из знаний: форма стояла на месте «кто» (название) или «какой/что делает»;
+        # слова разной роли в одно не сливаются («синица» ≠ «синий», «белка» ≠ «белые»)
+        self.hints: dict[str, str] = {}                # сильные: из надёжно понятых простых фраз
+        self.weak_hints: dict[str, str] = {}           # слабые: из разбора сложных фраз, пересчитываются
+        self.weak_next: dict[str, str] = {}            # копятся при перечитывании, заменяют старые в конце
+        self.known_concepts: set[str] = set()
 
     # ---------- формы и окончания ----------
     def see(self, toks: list[str]) -> None:
@@ -102,7 +108,9 @@ class TextLanguage:
                 stem, end = (w, "") if k == 0 else (w[:-k], w[-k:])
                 if len(stem) < 3 or end not in self.endings:
                     continue
-                family = {e for e in self.endings if stem + e in forms}
+                mine = self.role(w)
+                family = {e for e in self.endings if stem + e in forms
+                          and not (mine and self.role(stem + e) and self.role(stem + e) != mine)}
                 if len(family) > best_size or (len(family) == best_size and best_size >= 2 and len(stem) > len(best)):
                     best, best_size = stem, len(family)
             self.lemma_of[w] = best if best_size >= 2 else w
@@ -120,13 +128,17 @@ class TextLanguage:
         best: dict[str, float] = {}
         for w, n in self.forms.items():
             lem = self.lemma_of.get(w, w)
-            score = n + 5 * self.first.get(w, 0) + (3 * n if w.endswith(("ет", "ит", "ут", "ют", "ат", "ят"))
-                                                    and not w.endswith("ть") else 0)
+            verb_sing = w.endswith(("ет", "ит", "ется", "ится"))       # «дышит», «охотится»
+            verb_plur = w.endswith(("ут", "ют", "ат", "ят", "утся", "ются", "атся", "ятся"))
+            score = n + 5 * self.first.get(w, 0) + (6 * n if verb_sing else 2 * n if verb_plur else 0)
             if score > best.get(lem, -1):
                 self.display[lem], best[lem] = w, score
         if added:
             self.journal.append(f"выучила окончания: {', '.join('-' + e if e else '(нулевое)' for e in added)}")
         return added
+
+    def role(self, w: str) -> str | None:
+        return self.hints.get(w) or self.weak_hints.get(w)
 
     def lemma(self, w: str) -> str:
         lem = self.lemma_of.get(w)
@@ -144,7 +156,10 @@ class TextLanguage:
                 n = 0
                 while n < min(len(L), len(w)) and L[n] == w[n]:
                     n += 1
-                if n >= 4 and n >= len(L) - 1 and w[n:] in self.endings and L[n:] in self.endings | {""} \
+                if self.role(w) and self.role(L) and self.role(w) != self.role(L):
+                    continue
+                both_endings = w[n:] in self.endings and L[n:] in self.endings | {""}
+                if both_endings and n >= 4 and (n >= len(L) - 1 or n >= 0.6 * max(len(L), len(w))) \
                         and (best == w or len(L) > len(best)):
                     best = self.lemma_of.get(L, L)
             for L in self._families:
@@ -152,6 +167,9 @@ class TextLanguage:
                 while n < min(len(L), len(w)) and L[n] == w[n]:
                     n += 1
                 tail = w[n:]
+                fam_hints = {self.role(f) for f, l in self.lemma_of.items() if l == L} - {None}
+                if self.role(w) and fam_hints and self.role(w) not in fam_hints:
+                    continue
                 close = n >= 4 or (n >= 3 and tail in self.endings)   # «дыш-ит» ~ «дыша-т»
                 if close and n >= len(L) - 1 and len(tail) <= 3 and (best == w or len(L) > len(best)):
                     best = L
@@ -192,13 +210,17 @@ class TextLanguage:
                     if rel is None:
                         continue
                     frame = tuple("X" if k == i else "Y" if k == j else toks[k] for k in range(len(toks)))
-                    if len(frame) > 6 or frame in self.frames:
-                        continue
+                    if len(frame) > 6 or frame in self.frames or frame[-1] != "Y":
+                        continue                           # оборот — это связь: [кто] [связка] [что]
+                    literals = [w for w in frame if w not in ("X", "Y")]
+                    if not literals or any(lem[k] in self.known_concepts for k in range(len(toks))
+                                           if frame[k] not in ("X", "Y") and k not in (i, j)):
+                        continue                           # названия в обороте — это не связка
                     cand[frame][rel] += 1
         added = []
         for frame, rels in cand.items():
             (rel, pol), n = rels.most_common(1)[0]
-            if n >= 2 and n == sum(rels.values()):
+            if n >= 2 and n >= 0.85 * sum(rels.values()):    # подавляющее большинство подтверждений
                 self.frames[frame] = {"rel": rel, "pol": pol, "innate": False, "support": n}
                 for t in frame:
                     if t not in ("X", "Y") and t not in INNATE_FUNCTION:

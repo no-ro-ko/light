@@ -25,6 +25,7 @@ from .knowledge import Knowledge
 from .language import COPULA, NEG, TextLanguage, split_sentences, tokens
 from .measures import MeasureField, extract
 from .rules import Ev, RuleField, moral, unknown_word, what_if_not, why_did, why_happened
+from .syntax import COPULA as SYN_COPULA, PREPS, SOFT, Syntax
 
 
 class Organism:
@@ -44,10 +45,19 @@ class Organism:
         self.journal: list[str] = []
         self.last_motive = None
         self.events: set[int] = set()
+        self.syntax = Syntax()
+        self.compounds: dict[str, tuple[str, list[str]]] = {}   # «синий кит» → (кит, [синий])
+        self.some: dict[tuple, list[str]] = {}                   # «некоторые птицы не летают»
+        self.know.name = self.name
 
     def __setstate__(self, d):
         self.__dict__.update(d)
-        self.know.name = self.lang.name
+        self.know.name = self.name
+
+    def name(self, key: str) -> str:
+        """Как показывать понятие: составное — так, как впервые прочитала («синий кит»)."""
+        shown = getattr(self, "compound_names", {}).get(key)
+        return shown or " ".join(self.lang.name(p) for p in key.split(" "))
 
     # ================= чтение =================
     def read(self, name: str, text: str) -> dict:
@@ -97,10 +107,14 @@ class Organism:
         t = tokens(s)
         return 2 <= len(t) <= 3 and not (set(t) & (COPULA | {NEG})) and not any(x[0].isdigit() for x in t)
 
-    def _digest(self, indices) -> int:
-        """Понять предложения: факт, измерение, определение. → сколько новых фактов."""
+    def _digest(self, indices, complex_ok: bool = True) -> int:
+        """Понять предложения: факт, измерение, определение, сложная фраза. → новых фактов."""
         new = 0
+        self._complex_ok = complex_ok
+        last_source = None
         for i in indices:
+            if self.memory[i][0] != last_source:
+                self._prev, last_source = None, self.memory[i][0]
             if i in self.understood:
                 continue
             source, s = self.memory[i]
@@ -123,12 +137,24 @@ class Organism:
                 if self.know.tell(kind, x, y, pol, source) == "new":
                     new += 1
                 self.understood.add(i)
+                forms = [w for w in toks if not self.lang.is_function(w)]
+                if len(forms) == 2:                    # какие окончания у «кто» и у «что делает / какой»
+                    self.syntax.observe(self.lang, forms[0], "noun")
+                    self.syntax.observe(self.lang, forms[1], "noun" if kind == "isa" else "pred")
+                    self.lang.hints.setdefault(forms[0], "noun")
+                    self.lang.hints.setdefault(forms[1], "noun" if kind == "isa" else "pred")
                 if len(toks) == 2:
                     self.colors.read(s)                # «листья зелёные» — пример цвета
+                self._prev = [toks[0]] if not self.lang.is_function(toks[0]) else self._prev
                 continue
             m = re.match(r"^(\w+)\s*(?:—|-)?\s*это\s+(.{6,})$", s.lower())
-            if m and len(m.group(2).split()) >= 2:
+            if m and len(m.group(2).split()) >= 2 and not any(w in m.group(2) for w in (",", "котор")):
                 self.definitions[self.lang.lemma(m.group(1))] = m.group(2)
+                self.understood.add(i)
+                continue
+            got = self._complex(s, source) if self._complex_ok else 0   # сложная → простые
+            if got:
+                new += got
                 self.understood.add(i)
                 continue
             for w in toks:                              # незнакомые слова-ощущения («в зелёном саду»)
@@ -136,6 +162,70 @@ class Organism:
                     pass
             self.colors.read(s)
         return new
+
+    # ---------- сложные фразы ----------
+    def concept(self, words: list[str]) -> str:
+        if len(words) == 1:
+            return self.lang.lemma(words[0])
+        lem = [self.lang.lemma(w) for w in words]
+        key = " ".join(lem)
+        # «синий кит»: последнее слово главное; «детёныши китов»: главное первое
+        nouns = [self.syntax.word_class(self.lang, self.know, w) == "noun" for w in words]
+        head = lem[0] if all(nouns[:2]) else lem[-1]
+        self.compounds[key] = (head, [x for x in lem if x != head])
+        if not hasattr(self, "compound_names"):
+            self.compound_names = {}
+        self.compound_names.setdefault(key, " ".join(words))
+        if head == lem[-1]:                             # «синий кит»: «синий» — признак, «кит» — название
+            for w in words[:-1]:
+                self.lang.weak_next.setdefault(w, "pred")
+            self.lang.weak_next.setdefault(words[-1], "noun")
+        return key
+
+    def _complex(self, s: str, source: str) -> int:
+        clauses, self._prev = self.syntax.clauses(s, self.lang, self.know, getattr(self, "_prev", None))
+        told = 0
+        for c in clauses:
+            subj = self.concept(c.subject)
+            for kind, x, y, pol in self._interpret(subj, c):
+                where = f"{source} (из сложной фразы)"
+                if c.some:
+                    self.some.setdefault((x, y, pol), []).append(where)
+                    told += 1
+                    continue
+                if self.know.tell(kind, x, y, pol, where) == "new":
+                    told += 1
+        return told
+
+    def _interpret(self, subj: str, c) -> list[tuple]:
+        toks = ["<x>"] + c.rest
+        f = self.lang.parse(toks, self.know.is_category)
+        if f and f[1] == "<x>":
+            kind, _, y, pol = f
+            return [(kind, subj, y, pol)]
+        rest, pol = list(c.rest), True
+        if rest and rest[0] == "не":
+            pol, rest = False, rest[1:]
+        if not rest or rest[0] in SYN_COPULA or rest[0] in PREPS or rest[0] in self.lang.frame_words \
+                or rest[0] in ("умеет", "умеют", "может", "могут", "является", "являются"):
+            return []                                    # связка без понятого оборота — не гадаю
+        if self.syntax.word_class(self.lang, self.know, rest[0]) == "noun":
+            return []                                    # название без связки — не понимаю, что сказано
+        pred = self.lang.lemma(rest[0])
+        self.lang.weak_next.setdefault(rest[0], "pred")     # слабая подсказка: это слово — действие
+        for w in c.subject[-1:]:
+            self.lang.weak_next.setdefault(w, "noun")
+        out = [("prop", subj, pred, pol)]
+        comp = []
+        for w in rest[1:]:
+            if w in {",", "и", "а", "но", "или"}:
+                break
+            if w not in SOFT:
+                comp.append(w)
+        comp = comp[:3]
+        if comp and pol:
+            out.append(("prop", subj, pred + " " + " ".join(self.lang.lemma(w) for w in comp), True))
+        return out
 
     def coverage(self) -> float:
         return len(self.understood) / max(len(self.memory), 1)
@@ -148,20 +238,30 @@ class Organism:
     def reread(self) -> None:
         """Перечитать всю память заново — уже с тем языком, который вырос с тех пор."""
         self.know = Knowledge()
-        self.know.name = self.lang.name
         self.measures = MeasureField()
         self.colors = Grounder()
         self.definitions = {}
+        self.syntax = Syntax()
+        self.compounds, self.some, self._prev = {}, {}, None
+        self.lang.weak_next = {}                        # слабые подсказки — заново, с выросшим языком
+        self.know.name = self.name
         self.understood = set()
-        self._digest(range(len(self.memory)))         # событие сказки может быть и фактом
+        # сначала простые фразы (по ним видно, какие слова — названия, а какие — действия),
+        # потом сложные — уже с этим знанием
+        self._digest(range(len(self.memory)), complex_ok=False)
+        self._digest(range(len(self.memory)), complex_ok=True)
         self.understood |= self.events
+        self.lang.weak_hints, self.lang.weak_next = self.lang.weak_next, {}
+        self.lang._guess = {}
 
     def sleep(self) -> list[str]:
         notes, before = [], self.coverage()
         n_facts = self._facts()
-        notes += [f"выучила окончания: {x}" for x in self.lang.grow_morphology()]
-        self.reread()
+        for _ in range(2):                             # язык → перечитать → подсказки → язык точнее
+            notes += [f"выучила окончания: {x}" for x in self.lang.grow_morphology()]
+            self.reread()
         for _ in range(4):
+            self.lang.known_concepts = set(self.know.concepts)
             added = self.lang.learn_frames([tokens(s) for _, s in self.memory], self.know.known)
             if not added:
                 break
@@ -181,6 +281,9 @@ class Organism:
         n, L = self.lang.name, self.lang.lemma
         t = q.lower().replace("ё", "е").strip(" ?!.")
         t = " ".join(re.sub(r"[,:;]", " ", t).split())
+        m = re.match(r"что ты знаешь (?:о|об|про)\s+(.+)$", t)
+        if m:
+            return self._about(m.group(1).split())
         if re.search(r"что ты знаешь|чему ты научилась", t):
             return self.report()
         if re.search(r"сомнева", t):
@@ -194,6 +297,24 @@ class Organism:
             return ("Больше всего я хочу узнать: " + " | ".join(qs[:5])) if qs else "Вопросов у меня сейчас нет."
         if re.search(r"как ты (выросла|изменилась)", t):
             return "Во мне изменилось: " + " | ".join(self.journal[-8:]) if self.journal else "Я ещё не спала."
+        m = re.match(r"все ли\s+(\w+)\s+(.+)$", t)
+        if m:
+            return self._all(m.group(1), m.group(2).split())
+        m = re.match(r"(?:чем отличаются|чем отличается)\s+(\w+)\s+(?:и|от)\s+(\w+)", t)
+        if m:
+            return self._compare(m.group(1), m.group(2), differ=True)
+        m = re.match(r"чем похожи\s+(\w+)\s+и\s+(\w+)", t)
+        if m:
+            return self._compare(m.group(1), m.group(2), differ=False)
+        m = re.match(r"где (?:живет|живут|обитает|обитают)\s+(.+)$", t)
+        if m:
+            return self._where(m.group(1).split())
+        m = re.match(r"(?:что (?:умеет|умеют|делает|делают)|что ты знаешь (?:о|об|про))\s+(.+)$", t)
+        if m:
+            return self._about(m.group(1).split())
+        m = re.match(r"^(?:кто|какие\s+(\w+))\s+(.+)$", t)
+        if m and not t.startswith(("кто такой", "кто такая", "кто такие")):
+            return self._who(m.group(2).split(), m.group(1))
         m = re.match(r"(?:что значит|что такое|кто такой|кто такая)\s+(\w+)", t)
         if m:
             return self._meaning(m.group(1))
@@ -231,18 +352,189 @@ class Organism:
         m = re.match(r"(?:какой|какая|каким|какое|какую)\s+(?:должна быть|должен быть|должно быть|нужна|нужен|нужно)?\s*(\w+)\s+чтобы\s+(.+)", t)
         if m:
             return self._solve(m.group(1), m.group(2))
-        m = re.match(r"является ли\s+(\w+)\s+(\w+)", t) or re.match(r"(\w+)\s+(?:—\s*)?это\s+(\w+)$", t)
+        m = re.match(r"является ли\s+(.+)$", t)
         if m:
-            v = self.know.judge_isa(L(m.group(1)), L(m.group(2)))
-            return self._say(v)
-        m = re.match(r"(\w+)\s+ли\s+(\w+)$", t)
+            words = m.group(1).split()
+            x, rest = self._split_subject(words)
+            if x and rest:
+                return self._say(self._judge_isa(x, self._key(rest)))
+        m = re.match(r"(\w+)\s+(?:—\s*)?это\s+(\w+)$", t)
         if m:
-            x, y = L(m.group(2)), L(m.group(1))
-            v = self.know.judge_isa(x, y) if self.know.is_category(y) else self.know.judge(x, y)
-            return self._say(v)
+            return self._say(self._judge_isa(L(m.group(1)), L(m.group(2))))
+        m = re.match(r"(\w+)\s+ли\s+(.+)$", t)
+        if m:
+            x, rest = self._split_subject(m.group(2).split())
+            y = L(m.group(1))
+            if self.know.is_category(y) and not rest:
+                return self._say(self._judge_isa(x, y))
+            if rest:                                     # «откладывает ли пингвин яйца»
+                key = self._pred_key([m.group(1)] + rest)
+                if key in self.know.predicates:
+                    y = key
+            return self._say(self.know.judge(x, y))
         return ("Я не поняла вопрос. Я умею отвечать на вопросы вида: «летает ли пингвин?», «является ли "
                 "кит животным?», «что значит зелёный?», «зачем лиса хвалит ворону?», «почему сыр падает?», "
                 "«что было бы, если бы ворона не пела?», «чему равен период, если длина 4?»")
+
+    # ---------- вопросы о многих понятиях сразу ----------
+    def _key(self, words: list[str]) -> str:
+        """«летучая мышь», «синий кит» → составное понятие, если оно мне известно."""
+        words = [w for w in words if w not in SOFT]
+        lem = [self.lang.lemma(w) for w in words]
+        for k in range(len(lem), 0, -1):
+            key = " ".join(lem[:k])
+            if key in self.know.concepts or key in self.compounds:
+                return key
+        return lem[-1] if lem else ""
+
+    def _pred_key(self, words: list[str]) -> str | None:
+        words = [w for w in words if w not in SOFT]
+        if words and words[0] in ("умеет", "умеют", "может", "могут") and len(words) > 1:
+            words = words[1:]
+        lem = [self.lang.lemma(w) for w in words]
+        for k in range(len(lem), 0, -1):
+            key = " ".join(lem[:k])
+            if key in self.know.predicates:
+                return key
+        return lem[0] if lem else None
+
+    def _split_subject(self, words: list[str]) -> tuple[str, list[str]]:
+        """Самое длинное известное понятие в начале: «синий кит животным» → («синий кит», [животным])."""
+        for k in range(len(words), 0, -1):
+            key = " ".join(self.lang.lemma(w) for w in words[:k])
+            if key in self.know.concepts or key in self.compounds:
+                return key, words[k:]
+        return (self.lang.lemma(words[0]), words[1:]) if words else ("", [])
+
+    def _judge_isa(self, x: str, y: str):
+        v = self.know.judge_isa(x, y)
+        if v.value is None or v.source == "по умолчанию":
+            head = self.compounds.get(x, (None,))[0]
+            if head and head != x and (head == y or self.know.judge_isa(head, y).value):
+                from ..mind.mind import Verdict
+                return Verdict(True, 0.6, [f"«{self.name(x)}» — по названию разновидность «{self.name(head)}»",
+                                           f"наверное, {self.name(x)} — это {self.name(y)} (но названия "
+                                           f"обманывают: летучая мышь — не мышь)"], "гипотеза")
+        return v
+
+    def _yes(self, x: str, p: str):
+        v = self.know.judge(x, p)
+        return v if v.value and v.conf >= 0.75 else None
+
+    def _who(self, words: list[str], among: str | None) -> str:
+        neg = bool(words) and words[0] == "не"
+        if neg:
+            words = words[1:]
+        p = self._pred_key(words)
+        if not p or p not in self.know.predicates:
+            return f"Я не знаю никого, о ком было бы сказано «{' '.join(words)}»."
+        pool = sorted(self.know.concepts)
+        if among:
+            group = self._key([among])
+            pool = sorted(self.know.descendants(group))
+        read, derived = [], []
+        for x in pool:
+            v = self.know.judge(x, p)
+            if v.value is (not neg) and v.conf >= 0.75:
+                (read if v.source == "прочитала" else derived).append(self.name(x))
+        what = ("не " if neg else "") + self.name(p)
+        if not read and not derived:
+            return f"Не знаю никого, кто {what}."
+        out = f"{what.capitalize()}: " + ", ".join(read) if read else ""
+        if derived:
+            out += ("; " if out else "") + "а по выводу ещё: " + ", ".join(derived)
+        return out + "."
+
+    def _about(self, words: list[str]) -> str:
+        x = self._key(words)
+        own, inherited = [], []
+        yes = [p for p in sorted(self.know.predicates)
+               if (v := self.know.judge(x, p)).value and v.conf >= 0.75]
+        for p in yes:
+            if any(q.startswith(p + " ") for q in yes):
+                continue                                  # «живёт» уже сказано в «живёт в море»
+            v = self.know.judge(x, p)
+            (own if v.source == "прочитала" else inherited).append(self.name(p))
+        parents = self.know.parents(x)
+        if not own and not inherited and not parents:
+            return f"Я ничего не знаю о «{' '.join(words)}»."
+        parts = []
+        if parents:
+            parts.append(f"{self.name(x)} — это {', '.join(self.name(y) for y in parents)}")
+        if own:
+            parts.append("прочитала: " + ", ".join(own))
+        if inherited:
+            parts.append("а ещё, по роду: " + ", ".join(inherited))
+        return ("; ".join(parts) + ".").capitalize()
+
+    def _where(self, words: list[str]) -> str:
+        x = self._key(words)
+        roots = ("жив", "обита", "наход", "водит")       # «живёт / живут / обитает / водится»
+        found = []
+        for p in sorted(self.know.predicates):
+            parts = p.split(" ")
+            if len(parts) >= 3 and parts[0][:3] in {r[:3] for r in roots} and parts[1] in PREPS \
+                    and parts[0] != self.lang.lemma("живое"):
+                v = self.know.judge(x, p)
+                if v.value and v.conf >= 0.75:
+                    found.append((self.name(p).split(" ", 1)[1], v))
+        if not found:
+            return f"Не знаю, где живёт {self.name(x)}."
+        place, v = found[0]
+        return f"{place.capitalize()}. " + " → ".join(v.chain)
+
+    def _compare(self, a: str, b: str, differ: bool) -> str:
+        x, y = self._key([a]), self._key([b])
+        diffs, same = [], []
+        for p in sorted(self.know.predicates):
+            va, vb = self.know.judge(x, p), self.know.judge(y, p)
+            if va.conf >= 0.75 and vb.conf >= 0.75 and va.value is not None and vb.value is not None:
+                if va.value != vb.value:
+                    diffs.append(f"{self.name(x)} {'' if va.value else 'не '}{self.name(p)}, "
+                                 f"а {self.name(y)} {'' if vb.value else 'не '}{self.name(p)}")
+                elif va.value:
+                    same.append(self.name(p))
+        # одно и то же действие по-разному: «кит дышит лёгкими, а акула дышит жабрами»
+        def ways(z):
+            out = {}
+            for (s, q), (pos, neg) in self.know.prop.items():
+                if s == z and pos > neg and " " in q:
+                    out.setdefault(q.split(" ")[0], []).append(q)
+            return out
+        wx, wy = ways(x), ways(y)
+        for base in sorted(set(wx) & set(wy)):
+            if set(wx[base]) != set(wy[base]):
+                diffs.insert(0, f"{self.name(x)} {', '.join(self.name(q) for q in wx[base])}, "
+                                f"а {self.name(y)} {', '.join(self.name(q) for q in wy[base])}")
+        pa, pb = set(self.know.parents(x)), set(self.know.parents(y))
+        if differ:
+            kinds = []
+            if pa != pb and pa and pb:
+                kinds.append(f"{self.name(x)} — это {', '.join(self.name(v) for v in pa)}, "
+                             f"а {self.name(y)} — {', '.join(self.name(v) for v in pb)}")
+            items = kinds + diffs
+            return ("; ".join(items[:6]) + ".").capitalize() if items else "Различий я не знаю."
+        common = [self.name(v) for v in self.know.ancestors and
+                  {c for lvl in self.know.ancestors(x) for c, _ in lvl} & {c for lvl in self.know.ancestors(y) for c, _ in lvl}]
+        items = ([f"оба — это {', '.join(common)}"] if common else []) + ([f"оба: {', '.join(same[:6])}"] if same else [])
+        return ("; ".join(items) + ".").capitalize() if items else "Сходства я не знаю."
+
+    def _all(self, group: str, words: list[str]) -> str:
+        x, p = self._key([group]), self._pred_key(words)
+        neg = words and words[0] == "не"
+        if neg:
+            p = self._pred_key(words[1:])
+        some = self.some.get((x, p, neg)) or self.some.get((x, p, not neg))
+        exceptions = [self.name(k) for k in sorted(self.know.descendants(x))
+                      if (v := self.know.judge(k, p)).value is (neg) and v.conf >= 0.75]
+        if some or exceptions:
+            text = "Нет"
+            if some:
+                text += f": в «{some[0]}» сказано, что это верно лишь для некоторых"
+            if exceptions:
+                text += f"; например: {', '.join(exceptions[:5])}"
+            return text + "."
+        return self._say(self.know.judge(x, p))
 
     @staticmethod
     def _say(v) -> str:

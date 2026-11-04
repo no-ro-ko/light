@@ -137,6 +137,12 @@ class Knowledge:
     def direct(self, x: str, p: str) -> Verdict | None:
         pos, neg = self.prop.get((x, p), (0, 0))
         if pos == neg:
+            # более точное включает более общее: «откладывает яйца на берегу» ⇒ «откладывает яйца»
+            for (a, q), (qp, qn) in self.prop.items():
+                if a == x and qp > qn and q.startswith(p + " "):
+                    where = self.src.get(("prop", x, q, True), ["?"])[0]
+                    return Verdict(True, 0.95, [f"в «{where}» написано: {self._say('prop', x, q, True)}"],
+                                   "прочитала")
             return None
         v = pos > neg
         where = self.src.get(("prop", x, p, v), ["?"])[0]
