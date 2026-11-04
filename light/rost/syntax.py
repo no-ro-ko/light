@@ -52,6 +52,11 @@ class Syntax:
     def __init__(self):
         self.noun_end: Counter = Counter()
         self.pred_end: Counter = Counter()
+        self.mods: set[str] = set()                     # формы, стоявшие признаком перед названием
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self.__dict__.setdefault("mods", set())
 
     # ---------- классы слов из собственных знаний ----------
     @staticmethod
@@ -210,6 +215,7 @@ class Syntax:
                 for m in mods:
                     if not neg and self.word_class(lang, know, m) != "noun":
                         out.append(Clause(s, [m], some))
+                        self.mods.add(m)
             return out, subjects[0]
         # «X делает …»: подлежащее — до первого действия/признака
         if ch[0] in PRONOUNS:

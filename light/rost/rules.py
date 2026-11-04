@@ -65,16 +65,23 @@ def _common(a: str, b: str) -> int:
 
 
 class RuleField:
-    def __init__(self, min_support: int = 2, trust: float = 0.8, give_up: float = 0.6):
+    def __init__(self, min_support: int = 2, trust: float = 0.8, give_up: float = 0.6, horizon: int = 2):
         self.min_support = min_support
         self.trust = trust            # правило надёжно, если сбывается не реже
         self.give_up = give_up        # ниже — совпадение (если уточнить не удалось)
+        self.horizon = horizon        # следствие — в одной из ближайших фраз (в рассказе бывают вставки)
         self.entities: list[str] = []
         self.verbs: list[str] = []
         self.stories: list[list[Ev]] = []
         self.seen: Counter = Counter()           # сколько раз встречалась схема перехода
         self.rules: dict[Rule, dict] = {}        # узлы-правила (растут по мере опыта)
+        self.retired: set[Rule] = set()          # уточнённые или отвергнутые — заново не растут
         self.journal: list[str] = []
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self.__dict__.setdefault("retired", set())
+        self.__dict__.setdefault("horizon", 2)
 
     # ---------- чтение (формы слов сводятся: «вазу» → «ваза») ----------
     def _norm(self, w: str, pool: list[str]) -> str:
@@ -89,21 +96,37 @@ class RuleField:
         t = re.findall(r"\w+", sentence.lower())
         if len(t) not in (2, 3):
             return None
-        return Ev(self._norm(t[0], self.entities), self._norm(t[1], self.verbs),
-                  self._norm(t[2], self.entities) if len(t) == 3 else None)
+        return self.event(t[0], t[1], t[2] if len(t) == 3 else None, t[2] if len(t) == 3 else None)
+
+    def event(self, agent: str, action: str, obj: str | None = None, obj_form: str | None = None) -> Ev:
+        """Событие, понятое из обычной речи (герои и действие уже названы словами системы)."""
+        e = Ev(self._norm(agent, self.entities), self._norm(action, self.verbs),
+               self._norm(obj, self.entities) if obj else None)
+        self.__dict__.setdefault("as_agent", {}).setdefault(e.agent, Counter())[agent] += 1
+        if e.obj and obj_form:                     # как это говорится, когда над ним действуют: «ворону»
+            self.__dict__.setdefault("as_object", {}).setdefault(e.obj, Counter())[obj_form] += 1
+        return e
 
     # ---------- рост ----------
     def read(self, sentences: list[str]) -> list[Ev]:
-        story = [e for e in (self.parse(s) for s in sentences) if e]
+        return self.read_events([e for e in (self.parse(s) for s in sentences) if e])
+
+    def read_events(self, story: list[Ev]) -> list[Ev]:
         self.stories.append(story)
         for t in range(1, len(story)):
             r = self._abstract(story[:t], story[t])
             if r:
                 self.seen[r] += 1
-                if self.seen[r] >= self.min_support and r not in self.rules:
+                if self.seen[r] >= self.min_support and r not in self.rules and r not in self.retired:
                     self.rules[r] = {"born": len(self.stories)}
                     self.journal.append(f"[история {len(self.stories)}] выросло правило: {r.text()}")
         return story
+
+    def rebuild(self, stories: list[list[Ev]]) -> None:
+        """Истории перечитаны заново (с выросшим языком): опыт пересчитать, выращенное — сохранить."""
+        self.stories, self.seen = [], Counter()
+        for st in stories:
+            self.read_events(st)
 
     @staticmethod
     def _abstract(before: list[Ev], effect: Ev) -> Rule | None:
@@ -153,6 +176,10 @@ class RuleField:
             return None
         return Ev(filled["агент"], rule.effect, filled.get("объект"))
 
+    def came_true(self, st: list[Ev], t: int, p: Ev) -> bool:
+        """Предсказанное случилось вскоре (в одной из ближайших фраз)?"""
+        return p in st[t + 1:t + 1 + getattr(self, "horizon", 1)]
+
     def check(self, rule: Rule, stories: list[list[Ev]] | None = None) -> tuple[int, int]:
         """Самопроверка правила на памяти историй: (сколько раз было применимо, сколько сбылось)."""
         applicable = hit = 0
@@ -161,7 +188,7 @@ class RuleField:
                 p = self.fire(rule, st[t], st[:t])
                 if p is not None:
                     applicable += 1
-                    hit += t + 1 < len(st) and st[t + 1] == p
+                    hit += self.came_true(st, t, p)
         return applicable, hit
 
     def predict(self, prefix: list[Ev]) -> tuple[Ev | None, Rule | None]:
@@ -187,11 +214,13 @@ class RuleField:
             if better:
                 n2, k2 = self.check(better)
                 del self.rules[rule]
+                self.retired.add(rule)
                 self.rules[better] = {"born": len(self.stories), "надёжность": k2 / n2}
                 notes.append(f"уточнила правило «{rule.text()}» (сбывалось {k} из {n}) → "
                              f"«{better.text()}» (сбывается {k2} из {n2})")
             elif rel < self.give_up:
                 del self.rules[rule]
+                self.retired.add(rule)
                 notes.append(f"отказалась от правила «{rule.text()}»: сбывалось {k} из {n} — совпадение")
         self.journal += notes
         return notes
@@ -203,7 +232,8 @@ class RuleField:
         common = None
         for st in self.stories:
             for t in range(len(st) - 1):
-                if self.fire(rule, st[t], st[:t]) == st[t + 1]:
+                p = self.fire(rule, st[t], st[:t])
+                if p is not None and self.came_true(st, t, p):
                     tr = st[t].roles()
                     here = {(e.action, cr, trl) for e in st[:t] for cr, cf in e.roles().items()
                             for trl, tf in tr.items() if cf == tf and e.action != rule.trigger}
@@ -247,8 +277,15 @@ NEW = [
 
 
 # ================= смысл истории: зачем / почему / что было бы, если =================
-def say(e: Ev) -> str:
-    return " ".join(w for w in (e.agent, e.action, e.obj) if w)
+def say(e: Ev, field: RuleField | None = None) -> str:
+    agent, obj = e.agent, e.obj
+    forms = getattr(field, "as_object", {}).get(obj) if field and obj else None
+    if forms:
+        obj = forms.most_common(1)[0][0]           # «лиса хвалит ворону», а не «… ворона»
+    forms = getattr(field, "as_agent", {}).get(agent) if field else None
+    if forms:
+        agent = forms.most_common(1)[0][0]         # «конфета падает», а не «конфету падает»
+    return " ".join(w for w in (agent, e.action, obj) if w)
 
 
 def consequences(field: RuleField, start: Ev, state: list[Ev], blocked: set = frozenset(),
@@ -297,7 +334,8 @@ def why_did(field: RuleField, story: list[Ev], agent: str, action: str) -> tuple
     for d in desires:
         for i, (e, _) in enumerate(chain):
             if e.agent == act.agent and e.obj == d.obj:
-                steps = [say(act)] + [say(ev) + (f" (ведь {say(c)})" if c else "") for ev, c in chain[:i + 1]]
+                steps = [say(act, field)] + [say(ev, field) + (f" (ведь {say(c, field)})" if c else "")
+                                             for ev, c in chain[:i + 1]]
                 return (f"чтобы получить {d.obj}: {act.agent} хочет {d.obj}, и это ведёт к цели: "
                         + " → ".join(steps)), (act, d, chain[:i + 1])
     return f"не вижу, к какому желанию «{act.agent}» это ведёт", None
@@ -321,23 +359,25 @@ def why_happened(field: RuleField, story: list[Ev], agent: str, action: str) -> 
                 break
         if not found:
             break
-        causes.append(f"{say(cur)} — потому что {say(found[0])}" + (f", а {say(found[1])}" if found[1] else ""))
+        causes.append(f"{say(cur, field)} — потому что {say(found[0], field)}"
+                      + (f", а {say(found[1], field)}" if found[1] else ""))
         cur = found[0]
-    return ("; ".join(causes) + f". А началось всё с того, что {say(cur)}") if causes else "не вижу причины"
+    return ("; ".join(causes) + f". А началось всё с того, что {say(cur, field)}") if causes else "не вижу причины"
 
 
 def what_if_not(field: RuleField, story: list[Ev], agent: str, action: str) -> str:
     removed = find(story, agent, action, field)
     if not removed:
         return "такого и не было"
-    derived = {e for i, e in enumerate(story[1:], 1)
-               if any(RuleField.fire(r, story[i - 1], story[:i - 1]) == e for r in field.rules)}
+    h = getattr(field, "horizon", 1)
+    derived = {e for i, e in enumerate(story) for j in range(max(0, i - h), i)
+               if any(RuleField.fire(r, story[j], story[:j]) == e for r in field.rules)}
     roots = [e for e in story if e not in derived and e != removed]
     world = list(roots)
     for r in roots:
         for e, _ in consequences(field, r, world, blocked={removed}):
             world.append(e)
-    lost = [say(e) for e in story if e not in world and e != removed]
+    lost = [say(e, field) for e in story if e not in world and e != removed]
     return "ничего бы не изменилось" if not lost else f"тогда не было бы: {', '.join(lost)}"
 
 

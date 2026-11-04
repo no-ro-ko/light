@@ -28,7 +28,9 @@ INNATE_FUNCTION = {
     "со", "из", "к", "ко", "по", "за", "от", "до", "о", "об", "при", "для", "что", "как", "так",
     "же", "бы", "то", "он", "она", "оно", "они", "его", "её", "их", "если", "чтобы", "когда",
     "уже", "ещё", "очень", "тоже", "там", "тут", "вот", "был", "была", "было", "были", "есть",
+    "значит",                                         # «X — значит Y»: два слова об одном
 }
+VOWELS = set("аеиоуыэюя")
 
 
 def tokens(sentence: str) -> list[str]:
@@ -39,7 +41,8 @@ def split_sentences(text: str) -> list[tuple[str, bool]]:
     """→ [(предложение, вопрос ли)]; абзацы (пустые строки) отмечаются пустой строкой."""
     out = []
     for para in re.split(r"\n\s*\n", text):
-        for m in re.finditer(r"(?:[^.!?…\n]|(?<=\d)\.(?=\d))+[.!?…]?", para):
+        # закрывающая кавычка остаётся при своей фразе: «…прекрасный!» Ворона обрадовалась.
+        for m in re.finditer(r"(?:[^.!?…\n]|(?<=\d)\.(?=\d))+[.!?…]*[»”\"]*", para):
             s = m.group(0).strip()
             if len(tokens(s)) >= 1:
                 out.append((s.rstrip(".!…").strip(), s.endswith("?")))
@@ -75,12 +78,51 @@ class TextLanguage:
         self.weak_hints: dict[str, str] = {}           # слабые: из разбора сложных фраз, пересчитываются
         self.weak_next: dict[str, str] = {}            # копятся при перечитывании, заменяют старые в конце
         self.known_concepts: set[str] = set()
+        self.spelling: dict[str, str] = {}             # «поет» → «поёт»: как слово было написано
+        self.same: list[tuple[str, str]] = []          # «запела — значит поёт»: (форма, форма)
+        self._alias: dict[str, str] = {}               # лемма → лемма (из self.same)
+        self._by_first: dict[str, list[str]] = {}
+        self._fam_roles: dict[str, set] = {}
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        for k, v in (("spelling", {}), ("same", []), ("_alias", {}), ("_by_first", {}), ("_fam_roles", {})):
+            self.__dict__.setdefault(k, v)
 
     # ---------- формы и окончания ----------
     def see(self, toks: list[str]) -> None:
         self.forms.update(t for t in toks if not t[0].isdigit())
         if toks and not toks[0][0].isdigit():
             self.first[toks[0]] += 1
+
+    def spell(self, raw: str) -> None:
+        """Запомнить написание с «ё», чтобы и самой говорить «поёт», а не «поет»."""
+        for t in TOKEN.findall(raw.lower()):
+            if "ё" in t:
+                self.spelling[t.replace("ё", "е")] = t
+
+    def equate(self, a: str, b: str) -> str | None:
+        """«Запела — значит поёт»: формы a и b — об одном. → запись для журнала или None."""
+        a, b = a.lower().replace("ё", "е"), b.lower().replace("ё", "е")
+        if a == b or (a, b) in self.same:
+            return None
+        self.same.append((a, b))
+        self._rebuild_alias()
+        return f"запомнила: «{self.spelling.get(a, a)}» — то же, что «{self.spelling.get(b, b)}»"
+
+    def _rebuild_alias(self) -> None:
+        self._alias = {}
+        for a, b in self.same:
+            la, lb = self._base(a), self._resolve(self._base(b))
+            if la != lb:
+                self._alias[la] = lb
+
+    def _resolve(self, lem: str) -> str:
+        seen = set()
+        while lem in self._alias and lem not in seen:
+            seen.add(lem)
+            lem = self._alias[lem]
+        return lem
 
     def grow_morphology(self) -> list[str]:
         """Выучить окончания по «парадигмам»: основа встречается с разными окончаниями."""
@@ -123,20 +165,30 @@ class TextLanguage:
                 er[f[len(lem):]][r] += 1
         self.ending_role = {e: c.most_common(1)[0][0] for e, c in er.items()
                             if c.most_common(1)[0][1] >= 2 and c.most_common(1)[0][1] >= 0.8 * sum(c.values())}
+        self._by_first = defaultdict(list)
+        for f in self.forms:
+            if len(f) >= 3 and not self.is_function(f):
+                self._by_first[f[0]].append(f)
+        self._merge_alternations()
         fam = Counter(self.lemma_of.values())
-        self._families = {L for L, k in fam.items() if k >= 2 and len(L) >= 4}
+        self._families = {L for L, k in fam.items() if k >= 2 and len(L) >= 3}
         # слова, встреченные пока в одной форме, — тоже основа для узнавания новых форм,
         # но только если «хвост» — уже выученное окончание («фигур-а» → «фигур-ой»)
         self._singles = {w for w in self.forms if len(w) >= 4 and w not in INNATE_FUNCTION
                          and self.lemma_of.get(w, w) == w} - self._families
         self._guess = {}
+        self._fam_roles = defaultdict(set)
+        for f, L in self.lemma_of.items():
+            if self.role(f):
+                self._fam_roles[L].add(self.role(f))
+        self._rebuild_alias()
         # как показывать слово: форма, в которой оно чаще стоит первым во фразе
         # (именительный: «млекопитающее», а не «млекопитающим»), а у действий — личная
         # форма («дышит», а не «дышать»)
         self.display = {}
         best: dict[str, float] = {}
         for w, n in self.forms.items():
-            lem = self.lemma_of.get(w, w)
+            lem = self.lemma(w)                                    # с догадками и «значит»
             verb_sing = w.endswith(("ет", "ит", "ется", "ится"))       # «дышит», «охотится»
             verb_plur = w.endswith(("ут", "ют", "ат", "ят", "утся", "ются", "атся", "ятся"))
             score = n + 5 * self.first.get(w, 0) + (6 * n if verb_sing else 2 * n if verb_plur else 0)
@@ -146,10 +198,35 @@ class TextLanguage:
             self.journal.append(f"выучила окончания: {', '.join('-' + e if e else '(нулевое)' for e in added)}")
         return added
 
+    def _merge_alternations(self) -> None:
+        """Семьи форм, связанные чередованием («держал, держала» ~ «держит», «орлы» ~ «орёл»), —
+        одно слово; главной остаётся семья, которая встречалась чаще."""
+        members: dict[str, set] = defaultdict(set)
+        for f, L in self.lemma_of.items():
+            members[L].add(f)
+
+        def weight(L):
+            return sum(self.forms[f] for f in members.get(L, ()))
+
+        for L in sorted(members, key=lambda x: (weight(x), x)):
+            if L not in members:
+                continue
+            for w in sorted(members[L]):
+                t = self._alternation(w, exclude=members[L])
+                if t != w and t != L and t in members and (weight(t), t) > (weight(L), L):
+                    for f in members.pop(L):
+                        self.lemma_of[f] = t
+                        members[t].add(f)
+                    break
+
     def role(self, w: str) -> str | None:
         return self.hints.get(w) or self.weak_hints.get(w)
 
     def lemma(self, w: str) -> str:
+        """Слово, к которому относится форма (с учётом выученного «X — значит Y»)."""
+        return self._resolve(self._base(w)) if self._alias else self._base(w)
+
+    def _base(self, w: str) -> str:
         lem = self.lemma_of.get(w)
         if lem is not None and lem != w:
             return lem
@@ -176,10 +253,12 @@ class TextLanguage:
                 while n < min(len(L), len(w)) and L[n] == w[n]:
                     n += 1
                 tail = w[n:]
-                fam_hints = {self.role(f) for f, l in self.lemma_of.items() if l == L} - {None}
+                fam_hints = self._fam_roles.get(L, set())
                 if self.role(w) and fam_hints and self.role(w) not in fam_hints:
                     continue
                 close = n >= 4 or (n >= 3 and tail in self.endings)   # «дыш-ит» ~ «дыша-т»
+                if len(L) == 3 and not (tail and tail[0] in VOWELS and n == 3):
+                    continue                                  # короткая основа: «лис-е», но не «лис-т»
                 if close and n >= len(L) - 1 and len(tail) <= 3 and (best == w or len(L) > len(best)):
                     best = L
         if best == w and len(w) >= 3 and not self.is_function(w):
@@ -194,39 +273,63 @@ class TextLanguage:
             if len(s) >= 2 and (e in self.endings or e == ""):
                 yield s, e
 
-    def _alternation(self, w: str) -> str:
-        """Чередования: беглая гласная («орл-ы» ~ «ор(е)л», «дн-я» ~ «д(е)нь», «льв-ы» ~ «л(е)в»)
-        и короткие основы глаголов («да-ет» ~ «да-ют»)."""
+    def _alternation(self, w: str, exclude=()) -> str:
+        """Чередования: беглая гласная («орл-ы» ~ «ор(е)л», «льв-ы» ~ «л(е)в»), короткие основы
+        глаголов («да-ет» ~ «да-ют») и гласная в конце основы действия («держа-ла» ~ «держи-т»,
+        «бежа-ла» ~ «бежи-т»). Из двух форм, встреченных по одному разу, словом считается
+        более частая — иначе они указывали бы друг на друга."""
         def compatible(f):
             return not (self.role(w) and self.role(f) and self.role(w) != self.role(f))
 
         def variants(s):
-            out = [s[:-1] + v + s[-1] for v in "ое"] if len(s) >= 2 else []
+            out = [s[:-1] + v + s[-1] for v in "ое"] if len(s) >= 3 else []   # «орл» → «орел»; «сл» — мало
             if "ь" in s:
                 out.append(s.replace("ь", "е", 1))
             return out
 
-        for f in self.forms:
-            if f == w or len(f) < 3 or self.is_function(f) or not compatible(f):
-                continue
+        def linked(f):
             for s, _ in self._splits(f):                    # w длиннее: «орел» от основы «орл»
                 for cand in variants(s):
                     if w.startswith(cand) and (w[len(cand):] in self.endings or w[len(cand):] == ""):
-                        return self.lemma_of.get(f, f)
+                        return True
             for s, _ in self._splits(w):                    # w короче: «орлы» от «орел»
                 for cand in variants(s):
                     if f.startswith(cand) and (f[len(cand):] in self.endings or f[len(cand):] == ""):
-                        return self.lemma_of.get(f, f)
+                        return True
             n = 0                                            # короткие основы глаголов
             while n < min(len(f), len(w)) and f[n] == w[n]:
                 n += 1
             if n >= 2 and self.ending_role.get(w[n:]) == "pred" and self.ending_role.get(f[n:]) == "pred" \
                     and self.role(f) == "pred":
-                return self.lemma_of.get(f, f)
+                return True
+            if w.endswith(("ся", "сь")) and f.endswith(("ся", "сь")) and self.role(w) != "noun":
+                bw, bf = w[:-2], f[:-2]                     # «обрадовал-а-сь» ~ «обрадовал-ся»:
+                m = 0                                        # без возвратной частицы — одна семья
+                while m < min(len(bw), len(bf)) and bw[m] == bf[m]:
+                    m += 1
+                if m >= 4 and bw[m:] in self.endings | {""} and bf[m:] in self.endings | {""}:
+                    return True
+            if self.role(f) == "pred" and self.role(w) != "noun" and n >= 3:
+                for s1, e1 in self._splits(w):              # «держа|ла» ~ «держи|т»: одна основа,
+                    for s2, e2 in self._splits(f):          # другая гласная перед окончанием
+                        if e1 and e2 and len(s1) == len(s2) >= 4 and s1[:-1] == s2[:-1] \
+                                and s1[-1] in VOWELS and s2[-1] in VOWELS:
+                            return True
+            return False
+
+        for f in self._by_first.get(w[0], ()):
+            if f == w or f in exclude or not compatible(f):
+                continue
+            target = self.lemma_of.get(f, f)
+            if target == f and (self.forms[f], f) <= (self.forms[w], w):
+                continue                                     # главное слово — более частая форма
+            if linked(f):
+                return target
         return w
 
     def name(self, lemma: str) -> str:
-        return self.display.get(lemma, lemma)
+        shown = self.display.get(lemma, lemma)
+        return self.spelling.get(shown, shown)
 
     def is_function(self, w: str) -> bool:
         return w in INNATE_FUNCTION or w in self.frame_words

@@ -75,7 +75,8 @@ class FromScratch(unittest.TestCase):
         self.assertIn("сыр падает", what_if)
         self.assertIn("лиса берёт сыр", what_if)
         self.assertIn("лесть", o.answer("Какая мораль?"))
-        self.assertIn("не знаю слова «пела»", o.answer("Что было бы, если бы ворона не пела?"))
+        self.assertIn("сыр падает", o.answer("Что было бы, если бы ворона не пела?"))   # «пела» — объяснили (14)
+        self.assertIn("не знаю слова «плясала»", o.answer("Что было бы, если бы ворона не плясала?"))
 
     def test_laws_from_records(self):
         o = self.org
@@ -88,7 +89,7 @@ class FromScratch(unittest.TestCase):
 
     def test_honest_about_classic_text(self):
         st = self.org.files["05_басня_крылов.txt"]
-        self.assertLessEqual(st["понято"] / st["предложений"], 0.3)
+        self.assertLessEqual(st["понято"] / st["предложений"], 0.6)    # события — лишь в части строк
         self.assertIn("05_басня_крылов.txt", self.org.report())
 
     def test_own_questions(self):

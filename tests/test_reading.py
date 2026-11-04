@@ -47,7 +47,7 @@ class ReadingNaturalText(unittest.TestCase):
         self.assertTrue(a("Откладывает ли пингвин яйца?").startswith("Да"))      # «все птицы» → пингвин
         self.assertIn("антарктид", a("Где живёт пингвин?").lower())
         self.assertIn("жабрами", a("Чем отличаются кит и акула?"))                # «…, а киты дышат лёгкими»
-        self.assertIn("легкими", a("Чем отличаются кит и акула?"))
+        self.assertIn("лёгкими", a("Чем отличаются кит и акула?"))                 # пишет с «ё», как прочитала
         self.assertTrue(a("Все ли птицы летают?").startswith("Нет"))
         self.assertIn("пингвин", a("Какие птицы не летают?"))
         self.assertIn("плавает", a("Что умеет дельфин?"))

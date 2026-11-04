@@ -72,7 +72,7 @@ class CauseField:
                 return True, False
             if q.subject and known.subject and isa(q.subject, known.subject):
                 return True, True
-        if q.bag and known.bag:
+        if q.bag and known.bag and min(len(q.bag), len(known.bag)) >= 2:   # одно общее слово — мало
             common = len(q.bag & known.bag) / min(len(q.bag), len(known.bag))
             if common >= 0.75 and q.neg == known.neg:
                 return True, False
