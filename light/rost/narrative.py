@@ -27,6 +27,8 @@
 """
 from __future__ import annotations
 
+import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -46,6 +48,36 @@ SEP = {",", ";", "—", "(", ")"}
 SAID = {"что", "чтобы", "будто", "который", "которая", "которое", "которые", "которого", "которую",
         "которой", "если", "когда", "потому", "пока", "где", "куда", "как", "ведь"}
 VOWELS = set("аеиоуыэюя")
+SPEECH_TALK = set("!?")
+YOU = {"ты", "тебя", "тебе", "тобой", "вы", "вас", "вам"}
+ME = {"я", "мне", "меня", "мной", "мы", "нам", "нас"}
+
+
+def speech_features(text) -> list[Counter]:
+    """Сказанное — по фразам; у каждой — приметы: основы слов, «ты»/«мне», «!», окончания слов.
+    Ничего не знает о том, какая речь — похвала: это выучится по примерам."""
+    out = []
+    parts = text if isinstance(text, list) else re.split(r"(?<=[!?.…])\s+", text)
+    for part in [x for x in parts if x.strip()]:
+        f = Counter()
+        toks = lex(part)
+        for t in toks:
+            if t in YOU:
+                f["#ты"] += 1
+            elif t in ME:
+                f["#мне"] += 1
+            elif t not in SEP and t not in PREPS and len(t) >= 3:
+                f["~" + t[:4]] += 1                            # основа: «хорош-», «крас-», «голос-»
+                f["-" + t[-1]] += 1                            # окончание: «-й» (дай, спой), «-а»
+        for ch in part:
+            if ch in SPEECH_TALK:
+                f[ch] += 1
+        words = [t for t in toks if t not in SEP]
+        if words:
+            f["^" + words[0][:4]] += 1                         # как начинается: «Как…», «Дай…»
+        if f:
+            out.append(f)
+    return out
 
 
 def tails(v: str) -> list[str]:
@@ -67,6 +99,7 @@ class Event:
     obj: str | None
     sent: int                       # номер предложения в памяти
     forms: tuple                    # как было написано: (кто, действие, кого)
+    note: str = ""                  # как понято, если не сказано прямо («по её словам: «…»»)
 
 
 @dataclass
@@ -95,6 +128,9 @@ class Narrator:
         self.verb_last: dict[str, set] = defaultdict(set)  # последняя буква действий
         self.adverbs: set[str] = set()                     # «однажды», «рядом», «давно»: обстоятельства
         self.after_attr: set[str] = set()                  # формы, стоявшие после признака: «маленький щенок»
+        # как звучит речь, которую рассказчик назвал сам: «хвалила: «…»», «просил: «…»», «сказал: «…»»
+        self.speech: dict[str, list] = defaultdict(list)   # действие (лемма) → приметы фраз
+        self.speech_form: dict[str, str] = {}              # как это действие написано («хвалила»)
         self._attr: tuple | None = None
         self._acts: set[str] = set()
         self._place: set[str] = set()
@@ -114,9 +150,10 @@ class Narrator:
         self.__dict__.update(d)
         for key, v in (("heroes", set()), ("after_prep", set()), ("_place", set()), ("_marks", set()),
                        ("adverbs", set()), ("_story_heroes", set()), ("after_attr", set()),
-                       ("_described", set())):
+                       ("_described", set()), ("speech_form", {})):
             self.__dict__.setdefault(key, v)
         self.__dict__["verb_last"] = defaultdict(set, d.get("verb_last", {}))
+        self.__dict__["speech"] = defaultdict(list, d.get("speech", {}))
         for key in ("pron_tails", "noun_tails"):
             old = d.get(key, {})
             fresh = defaultdict(lambda: defaultdict(set))
@@ -203,10 +240,13 @@ class Narrator:
         L = org.lang.lemma(w)
         if L in getattr(self, "_story_heroes", ()):          # «Жил-был щенок… Щенок толкнул мяч»
             return True
-        if L in org.know.predicates and L not in org.know.concepts or w in self.adverbs:
+        if w in self.adverbs:
             return False
-        return L in org.know.concepts or L in self.heroes or L in self._place or L in self._described \
-            or org.lang.hints.get(w) == "noun"
+        if L in org.know.concepts or L in self.heroes or L in self._place or L in self._described:
+            return True                                      # видела на месте названия — это сильнее догадки
+        if L in org.know.predicates:
+            return False
+        return org.lang.hints.get(w) == "noun"
 
     def _attributes(self, org):
         """Признаки — по собственному опыту: слова, стоявшие перед названием («белые медведи»),
@@ -272,7 +312,7 @@ class Narrator:
     @staticmethod
     def oblique(org, w: str) -> bool:
         """Форма не та, в которой слово обычно начинает фразу («стола» при «стол», «лису» при «лиса»)."""
-        shown = org.lang.display.get(org.lang._base(w))
+        shown = getattr(org.lang, "base_display", {}).get(org.lang._base(w)) or org.lang.display.get(org.lang._base(w))
         return bool(shown) and shown != w
 
     def patient_like(self, w: str) -> bool:
@@ -286,6 +326,7 @@ class Narrator:
         self._marks = self._marked_tails(org)
         self._places(org, sentences)
         self._learn_adverbs(org, sentences)                 # «однажды», «рядом», «давно»
+        self._learn_speech(org, sentences)
         if self.adverbs:                                    # и опоры заново — уже без них
             for d in (self.verbs, self.agents, self.patients, self.verb_last):
                 d.clear()
@@ -321,6 +362,66 @@ class Narrator:
                     self.agents[case_key(ws[k])].add(ws[k])
                 if k + 2 < len(ws) and self.known_noun(org, ws[k + 2]):
                     self.patients[case_key(ws[k + 2])].add(ws[k + 2])
+
+    @staticmethod
+    def quotes(items: list[tuple[int, str]]) -> dict[int, list[str]]:
+        """Прямая речь: номер фразы, где она началась («…: «Какая ты умница!»), → сказанные фразы."""
+        out, cur, depth = {}, None, 0
+        for i, s in items:
+            lead = len(s) - len(s.lstrip("»” "))
+            if depth and lead:
+                depth = 0
+                cur = None
+            if depth == 0 and "«" in s:
+                cur = i
+                first = s.split("«", 1)[1]
+                depth = 1 if "»" not in first else 0
+                out[i] = [first.split("»")[0]]
+            elif depth and cur is not None:
+                out[cur].append(s.split("»")[0])
+                if "»" in s:
+                    depth, cur = 0, None
+        return out
+
+    def _learn_speech(self, org, sentences: list[str]) -> None:
+        """Примеры: рассказчик сам назвал, что это за речь («Мама хвалила дочку: «…»»)."""
+        items = list(enumerate(sentences))
+        said = self.quotes(items)
+        for i, text in said.items():
+            intro = sentences[i].split("«")[0]
+            if ":" not in intro:
+                continue
+            ws = [w for w in self._cut(lex(intro)) if w not in SOFT]
+            if not ws:
+                continue
+            ev = self._clause(org, self._classify(org, ws), Scene(), None, -1)
+            if ev is None:
+                continue
+            act = ev.action if ev.action in self._acts else "сказано"     # обычная речь — для сравнения
+            self.speech[act] += speech_features(text)
+            if act != "сказано":
+                self.speech_form.setdefault(act, ev.forms[1])
+
+    def classify_speech(self, text) -> list[tuple[str, float]]:
+        """Что это за речь: по фразам — на какие примеры похоже больше всего (без примет — ничего)."""
+        acts = {a: ex for a, ex in self.speech.items() if ex}
+        if len(acts) < 2:
+            return []
+        found = []
+        for f in speech_features(text):
+            best = None
+            for a, ex in acts.items():
+                score = 0.0
+                for feat in f:
+                    n_a = sum(1 for e in ex if feat in e)
+                    n_o = sum(1 for b, exb in acts.items() if b != a for e in exb if feat in e)
+                    N_o = sum(len(exb) for b, exb in acts.items() if b != a)
+                    score += math.log((n_a + 0.5) / (len(ex) + 1)) - math.log((n_o + 0.5) / (N_o + 1))
+                if best is None or score > best[1]:
+                    best = (a, score)
+            if best and best[0] != "сказано" and best[1] > 1.5:
+                found.append(best)
+        return found
 
     def _inflects(self, org, w: str) -> bool:
         """У слова встречались разные формы («лисица/лисицу») — значит, не наречие: наречия не меняются."""
@@ -622,7 +723,10 @@ class Narrator:
         if key in scene.seen:
             return key
         for e in reversed(scene.seen):
-            if org._isa(e, key):
+            if org._isa(e, key):                       # «птица» — это ворона (ворона — птица)
+                return e
+        for e in reversed(scene.seen):
+            if org._isa(key, e):                       # «плутовка» — это лиса (плутовка — хитрая лиса)
                 return e
         return key
 
@@ -631,6 +735,7 @@ class Narrator:
         from .causes import CauseField
         self._prepare(org)
         self._story_heroes = set()
+        said = self.quotes(items)
         scene, out, depth = Scene(), [], 0
         for i, s in items:
             lead = len(s) - len(s.lstrip("»” "))              # кавычка закрылась в самом начале
@@ -657,8 +762,33 @@ class Narrator:
                         scene.mention(x)
                         scene.core.append(x)
                 out.append(ev)
+            if i in said:                                  # прямая речь: что ею сделано?
+                out += self._speech_acts(org, i, said[i], scene, out)
         self._attr = None
         self._story_heroes = set()
+        return out
+
+    def _speech_acts(self, org, i: int, text, scene: Scene, story: list) -> list:
+        """«И говорит так сладко: «Голубушка, как хороша!… Спой, светик!»» → лиса хвалит ворону;
+        лиса просит ворону. Если рассказчик сам назвал («стала хвалить: «…»») — уже есть."""
+        last = story[-1] if story and story[-1].sent == i else None
+        if last is not None and last.action in self.speech:
+            return []
+        speaker = last.agent if last is not None else scene.agent
+        if speaker is None:
+            return []
+        actors = {e.agent for e in story}
+        whom = last.obj if last is not None and last.obj else next(
+            (e for e in reversed(scene.seen) if e != speaker and e in actors), None)
+        out, done = [], set()
+        for act, score in self.classify_speech(text):
+            if act in done:
+                continue
+            done.add(act)
+            first = next((t for t in text if t.strip()), "")[:40]
+            out.append(Event(speaker, act, whom, i, (org.name(speaker), self.speech_form.get(act, act), None),
+                             f"по словам: «{first}…» — так звучит, когда {self.speech_form.get(act, act)}"))
+            scene.agent = speaker
         return out
 
     def _marked_tails(self, org) -> set[str]:

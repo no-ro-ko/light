@@ -24,10 +24,10 @@ from ..mind.grounding import DEF, Grounder, stem
 from .knowledge import Knowledge
 from .language import COPULA, NEG, TextLanguage, split_sentences, tokens
 from .measures import MeasureField, extract
-from .rules import Ev, RuleField, moral, unknown_word, what_if_not, why_did, why_happened
+from .rules import Ev, RuleField, moral, say, unknown_word, what_if_not, why_did, why_happened
 from .syntax import COPULA as SYN_COPULA, PREPS, SOFT, Syntax
 from .causes import CauseField, Sit
-from .narrative import OBJ as OBJ_PRONOUNS, Narrator
+from .narrative import OBJ as OBJ_PRONOUNS, Event, Narrator
 
 def _cap(text: str) -> str:
     """С большой буквы — только первая буква (остальные не трогать: «… А началось всё»)."""
@@ -37,6 +37,8 @@ def _cap(text: str) -> str:
 # «Запела — значит поёт», «Лисица — то же, что лиса»: два слова об одном
 SAME = re.compile(r"^«?([а-я-]+)»?\s*(?:—|-|,)?\s*(?:значит|это то же,? что(?: и)?|то же,? что(?: и)?)"
                   r"\s*,?\s+«?([а-я-]+)»?$")
+# «Мяч пленил кошку — значит, кошка хочет мяч»: то же, сказанное по-другому (кто и над кем — как в примере)
+PARA = re.compile(r"^(.+?)\s*(?:—|-)\s*(?:это\s+)?значит,?\s+(.+)$")
 
 
 class Organism:
@@ -65,12 +67,16 @@ class Organism:
         self.paragraphs: list[tuple[str, list[int]]] = []        # (источник, номера предложений)
         self.tellings: list[list[tuple[int, str]]] = []          # к каждой истории: (фраза, как названо действие)
         self.episodic: set[int] = set()                          # фразы рассказов — события, а не общие сведения
+        self.paraphrases: list[tuple] = []                       # (действие, его пересказ, роли, откуда)
+        self.lessons: set[int] = set()                           # фразы-уроки: не события рассказа
         self.know.name = self.name
 
     def __setstate__(self, d):
         self.__dict__.update(d)
         self.__dict__.setdefault("narr", Narrator())
         self.__dict__.setdefault("episodic", set())
+        self.__dict__.setdefault("paraphrases", [])
+        self.__dict__.setdefault("lessons", set())
         self.__dict__.setdefault("tellings", [[] for _ in self.stories])
         if "paragraphs" not in d:                                # память старой версии: абзац = файл
             by_src: dict[str, list[int]] = {}
@@ -113,15 +119,55 @@ class Organism:
         for p in paragraphs:
             got = self._story(p)
             if got:
-                story, telling = got
-                self.rules.read_events(story)
-                self._keep_story(name, story, telling)
+                story, telling, complete = got
+                self.rules.read_events(story, complete)
+                self._keep_story(name, story, telling, complete)
         own = range(start, len(self.memory))
         stats = {"предложений": len(own), "понято": sum(1 for i in own if i in self.understood),
                  "новых фактов": facts, "новых правил": len(self.rules.rules) - n_rules_before,
                  "вопросов в файле": n_q}
         self.files[name] = stats
         return stats
+
+    # ---------- то же — другими словами ----------
+    def _learn_paraphrase(self, a: str, b: str, source: str) -> str | None:
+        """Из одного примера: какое действие — то же, что другое, и как при этом меняются роли."""
+        ea, eb = self.narr.events(self, [(-1, a)]), self.narr.events(self, [(-1, b)])
+        if len(ea) != 1 or len(eb) != 1:
+            return None
+        A, B = ea[0], eb[0]
+        roles = {"агент": A.agent, "объект": A.obj}
+        mapping = {}
+        for role, who in (("агент", B.agent), ("объект", B.obj)):
+            if who is None:
+                continue
+            src = next((r for r, x in roles.items() if x == who), None)
+            if src is None:
+                return None                             # участник взялся ниоткуда — не пересказ
+            mapping[role] = src
+        if mapping.get("агент") == "агент" and mapping.get("объект", "объект") == "объект":
+            return self.lang.equate(A.forms[1], B.forms[1])   # «была такова — значит убежала»
+        item = (A.forms[1], B.forms[1], tuple(sorted(mapping.items())), source)
+        if any(x[:3] == item[:3] for x in self.paraphrases):
+            return None
+        self.paraphrases.append(item)
+        return (f"запомнила: «{a}» — значит «{b}»: при «{A.forms[1]}» кто и над кем меняются местами")
+
+    def _paraphrase(self, evs: list) -> list:
+        """«Лисицу сыр пленил» → и ещё: лиса хочет сыр (по выученному примеру)."""
+        out = []
+        for e in evs:
+            out.append(e)
+            for src, tgt, mapping, _ in self.paraphrases:
+                if self.lang.lemma(src) != e.action:
+                    continue
+                roles, m = {"агент": e.agent, "объект": e.obj}, dict(mapping)
+                agent, obj = roles.get(m.get("агент")), roles.get(m.get("объект")) if "объект" in m else None
+                if agent:
+                    out.append(Event(agent, self.lang.lemma(tgt), obj, e.sent, (self.name(agent), tgt, None),
+                                     f"«{self.memory[e.sent][1][:40]}»: «{src}» — значит «{tgt}», "
+                                     f"а кто и над кем — наоборот (так в «{_}»)"))
+        return out
 
     # ---------- истории ----------
     def _story(self, p: list[int]):
@@ -140,24 +186,32 @@ class Organism:
             pairs = [(self.rules.parse(self.memory[i][1]), i) for i in kept]
             pairs = [(e, i) for e, i in pairs if e]
             self.__dict__.setdefault("simple_verbs", set()).update(e.action for e, _ in pairs)
-            return [e for e, _ in pairs], [(i, tokens(self.memory[i][1])[1]) for _, i in pairs]
-        evs = self.narr.events(self, [(i, self.memory[i][1]) for i in p])
+            return [e for e, _ in pairs], [(i, tokens(self.memory[i][1])[1]) for _, i in pairs], True
+        evs = self._paraphrase(self.narr.events(self, [(i, self.memory[i][1]) for i in p
+                                                       if i not in self.lessons]))
         if not self.narr.is_story(evs):
             return None
         story, telling = [], []
+        name = self.memory[p[0]][0]
         for e in evs:
             who, act, whom = e.forms
+            note = getattr(e, "note", "")
+            if e.agent not in self.know.concepts and e.agent not in self.narr.heroes \
+                    and who not in self.narr.adverbs and e.sent >= 0:
+                self.__dict__.setdefault("strangers", {}).setdefault((name, e.sent), self.name(e.agent))
             direct = whom and whom not in OBJ_PRONOUNS and self.lang.lemma(whom) == e.obj
             story.append(self.rules.event(self.name(e.agent), self.name(e.action),
                                           self.name(e.obj) if e.obj else None, whom if direct else None))
             telling.append((e.sent, act))
+            if note:                                    # как понято то, что не сказано прямо
+                self.__dict__.setdefault("notes", {})[(name, story[-1])] = note
             # рассказ сам подсказывает, где названия, а где действия (пригодится при перечитывании)
             self.lang.weak_next.setdefault(act, "pred")
             for w in (who, whom):
                 if w and w not in OBJ_PRONOUNS:
                     self.lang.weak_next.setdefault(w, "noun")
         self.episodic.update(p)
-        return story, telling
+        return story, telling, False
 
     def _heroes(self, paragraphs) -> None:
         """Герои простых историй («Кот хочет рыбу») — кто действует и над кем: это названия."""
@@ -166,10 +220,12 @@ class Organism:
                 for i in p:
                     t = tokens(self.memory[i][1])
                     self.narr.heroes.update(self.lang.lemma(w) for w in (t[0], t[2] if len(t) == 3 else None) if w)
+                    self.__dict__.setdefault("simple_verbs", set()).add(t[1])   # и их действия
 
-    def _keep_story(self, name: str, story, telling) -> None:
+    def _keep_story(self, name: str, story, telling, complete: bool = True) -> None:
         self.stories.append((name, story))
         self.tellings.append(telling)
+        self.__dict__.setdefault("story_complete", []).append(complete)
         sents = {i for i, _ in telling}
         self.events.update(sents)
         self.understood.update(sents)
@@ -177,17 +233,19 @@ class Organism:
     def _retell(self) -> None:
         """Перечитать рассказы заново — с выросшим языком и знаниями (и перестроить опыт правил)."""
         self.narr = Narrator()                          # опыт чтения — заново, без ошибок первого чтения
+        self.strangers, self.notes = {}, {}
         self.rules.entities, self.rules.verbs = [], []  # и как названы герои и действия — тоже
         self.rules.as_agent, self.rules.as_object = {}, {}
         self.simple_verbs = set()
         self._heroes([p for _, p in self.paragraphs])
         self.narr.learn(self, [s for _, s in self.memory])
         self.stories, self.tellings, self.events, self.episodic = [], [], set(), set()
+        self.story_complete = []
         for name, p in self.paragraphs:
             got = self._story(p)
             if got:
                 self._keep_story(name, *got)
-        self.rules.rebuild([st for _, st in self.stories])
+        self.rules.rebuild([st for _, st in self.stories], self.story_complete)
 
     def story_actions(self) -> set[str]:
         """Действия, в которых система уверена: из простых историй и из выросших правил. (Не из
@@ -232,7 +290,16 @@ class Organism:
                 if note:
                     self.journal.append(note)
                 self.understood.add(i)
+                self.lessons.add(i)
                 continue
+            m = PARA.match(s.lower().replace("ё", "е")) if self._complex_ok else None
+            if m and len(tokens(m.group(1))) >= 2 and len(tokens(m.group(2))) >= 2:
+                note = self._learn_paraphrase(m.group(1), m.group(2), source)
+                if note:                                # «Мяч пленил кошку — значит, кошка хочет мяч»
+                    self.journal.append(note)
+                    self.understood.add(i)
+                    self.lessons.add(i)
+                    continue
             pair = CauseField.split(s) if self._complex_ok else None
             if pair:                                    # «если …, то …», «… потому что …»
                 cause = self.situation(pair[0])
@@ -261,10 +328,15 @@ class Organism:
             m = re.match(r"^(\w+)\s*(?:—|-)?\s*это\s+(.{6,})$", s.lower())
             if m and len(m.group(2).split()) >= 2 and not any(w in m.group(2) for w in (",", "котор")):
                 self.definitions[self.lang.lemma(m.group(1))] = m.group(2)
+                if len(m.group(2).split()) == 2:       # «Плутовка — это хитрая лиса»: и род, и признак —
+                    if not self._complex_ok:            # это разберём на втором круге, со сложными фразами
+                        continue
+                    new += self._complex(s, source)
                 self.understood.add(i)
                 continue
-            if i in self.episodic:
-                continue                                # «лиса схватила сыр» — про этот рассказ, не про всех лис
+            if i in self.episodic or "«" in s or "»" in s or ":" in s:
+                continue                                # «лиса схватила сыр» — про этот рассказ, не про всех лис;
+                                                        # «…: «Молодец!»» — сказанное, а не утверждение о мире
             got = self._complex(s, source) if self._complex_ok else 0   # сложная → простые
             if got:
                 new += got
@@ -377,6 +449,7 @@ class Organism:
         self.syntax = Syntax()
         self.causes = CauseField()
         self.compounds, self.some, self._prev = {}, {}, None
+        self.paraphrases, self.lessons = [], set()
         self.lang.weak_next = {}                        # слабые подсказки — заново, с выросшим языком
         self.know.name = self.name
         self.understood = set()
@@ -456,7 +529,10 @@ class Organism:
         if m:
             return self._meaning(m.group(1))
         if re.search(r"перескаж|как ты поняла (?:рассказ|историю|басню)", t):
-            return self._retelling()
+            return self._retelling(t)
+        m = re.match(r"(?:обманул[аи]?|обманывал[аи]?|хитрил[аи]?|льстил[аи]?)\s+ли\s+(.+)$", t)
+        if m:
+            return self._deceit(m.group(1).split())
         m = re.match(r"зачем\s+(.+)$", t)
         if m:
             for agent, action in self._pairs(m.group(1).split()):
@@ -464,7 +540,11 @@ class Organism:
                     text, motive = why_did(self.rules, st, agent, action)
                     if motive:
                         self.last_motive = motive
-                        return _cap(text) + f". (из истории в «{src}»)"
+                        self.last_story = src
+                        how = [f"{say(e, self.rules)} — {self.notes[(src, e)]}" for e in motive[:2]
+                               if (src, e) in getattr(self, "notes", {})]
+                        return _cap(text) + f". (из истории в «{src}»)" + (
+                            ". Как я это поняла: " + "; ".join(how) if how else "")
             return "Я не нашла истории, где бы это было, или не понимаю, к чему это вело."
         m = re.match(r"почему\s+(.+)$", t)
         if m:
@@ -539,10 +619,35 @@ class Organism:
         for a, b in zip(words, words[1:]):
             yield self._said(a), self._said(b)
 
-    def _retelling(self) -> str:
-        """Как поняла последний рассказ: цепочка событий словами системы."""
-        from .rules import say
-        for (src, st), telling in zip(reversed(self.stories), reversed(self.tellings)):
+    def _deceit(self, words: list[str]) -> str:
+        """«Обманула ли лиса ворону?» — делала приятное другому не ради него, а чтобы получить своё
+        (то, что было у него)."""
+        who = self.rules._norm(self._said(words[0]), list(self.rules.entities)) if words else None
+        for src, st in reversed(self.stories):
+            for e in st:
+                if e.agent != who or not e.obj:
+                    continue
+                text, motive = why_did(self.rules, st, e.agent, e.action)
+                if not motive:
+                    continue
+                gain = motive[1].obj
+                holder = next((c.agent for _, c in motive[2] if c and c.obj == gain), None)
+                if holder != e.obj:
+                    continue                            # своё получила не у того, с кем так поступала
+                word = next((f"{_cap(self.name(k))} — это {v}" for k, v in self.definitions.items() if "ради" in v), "")
+                return (f"Похоже, да: {say(e, self.rules)} не ради неё самой, а чтобы получить {gain}, "
+                        f"который был у неё" + (f". {_cap(word)}" if word else "") + f". (из истории в «{src}»)")
+        return "Не вижу, чтобы кто-то поступал так ради выгоды."
+
+    def _retelling(self, about: str = "") -> str:
+        """Как поняла рассказ (тот, о котором был вопрос, или последний): цепочка событий словами системы."""
+        want = getattr(self, "last_story", None)
+        pairs = list(zip(reversed(self.stories), reversed(self.tellings)))
+        if "басн" in about:
+            pairs.sort(key=lambda x: "басн" not in x[0][0])
+        elif want:
+            pairs.sort(key=lambda x: x[0][0] != want)
+        for (src, st), telling in pairs:
             if len(st) >= 3:
                 n_sent = len({i for i, _ in telling})
                 total = sum(1 for s_, _ in self.memory if s_ == src)
@@ -812,7 +917,12 @@ class Organism:
         """Действия в рассказах, которых нет ни в других историях, ни в знаниях: без них не понять,
         к чему ведёт событие."""
         out, asked = [], set()
-        familiar = self.story_actions()                  # из простых историй и правил
+        familiar = self.story_actions() | {self.lang.lemma(p[0]) for p in self.paraphrases}
+        for (src, i), who in getattr(self, "strangers", {}).items():   # кто это — незнакомые герои
+            if who not in asked and self.lang.lemma(who) not in self.know.concepts:
+                asked.add(who)
+                out.append(f"Кто это — «{self.lang.spelling.get(who, who)}»? В рассказе «{src}»: "
+                           f"«{self.memory[i][1][:70]}»")
         for (src, st), telling in zip(self.stories, self.tellings):
             for e, (i, form) in zip(st, telling):
                 lem = self.lang.lemma(form)

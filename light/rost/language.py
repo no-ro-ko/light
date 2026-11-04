@@ -186,7 +186,9 @@ class TextLanguage:
         # (именительный: «млекопитающее», а не «млекопитающим»), а у действий — личная
         # форма («дышит», а не «дышать»)
         self.display = {}
+        self.base_display: dict[str, str] = {}
         best: dict[str, float] = {}
+        best_base: dict[str, float] = {}
         for w, n in self.forms.items():
             lem = self.lemma(w)                                    # с догадками и «значит»
             verb_sing = w.endswith(("ет", "ит", "ется", "ится"))       # «дышит», «охотится»
@@ -194,6 +196,9 @@ class TextLanguage:
             score = n + 5 * self.first.get(w, 0) + (6 * n if verb_sing else 2 * n if verb_plur else 0)
             if score > best.get(lem, -1):
                 self.display[lem], best[lem] = w, score
+            b = self._base(w)                                      # и для каждой семьи форм отдельно
+            if score > best_base.get(b, -1):                       # («лисица», хотя «лисица» = «лиса»)
+                self.base_display[b], best_base[b] = w, score
         if added:
             self.journal.append(f"выучила окончания: {', '.join('-' + e if e else '(нулевое)' for e in added)}")
         return added
