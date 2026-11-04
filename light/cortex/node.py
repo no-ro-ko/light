@@ -35,6 +35,8 @@ class CorticalNode(Node):
         self.region = region or CorticalRegion(name, self.encoder.size)
         self.surprise_level = surprise_level
         self.lexicon: dict[str, np.ndarray] = {}  # слово → типичные колонки (выход «к речи»)
+        self.last_surprise = 0.0   # для я-модели: насколько удивило последнее прочитанное
+        self.last_text = ""
 
     # ---------- чтение и декодирование ----------
     def read(self, text: str, learn: bool = True) -> list[float]:
@@ -42,6 +44,8 @@ class CorticalNode(Node):
         anomalies = []
         for w in self.encoder.tokens(text):
             anomalies.append(self.region.step(self.encoder.encode(w), learn))
+            if not learn:
+                continue
             cols = self.region.active_cols.astype(float)
             prev = self.lexicon.get(w)
             self.lexicon[w] = cols if prev is None else 0.8 * prev + 0.2 * cols
@@ -54,6 +58,15 @@ class CorticalNode(Node):
         scores = {w: float(v @ x) / (v.sum() or 1) for w, v in self.lexicon.items()}
         best = sorted(scores, key=scores.get, reverse=True)[:top]
         return [w for w in best if scores[w] >= 0.5]
+
+    def familiarity(self, seed: str) -> float:
+        """Чувство знакомости: насколько уверенно сеть ждёт продолжения, не вспоминая его."""
+        an = self.read(seed, learn=False)
+        if not an:
+            return 0.0
+        fluency = 1 - float(np.mean(an[1:] or an))
+        expects = self.region.predictive_strong.reshape(self.region.C, self.region.K).any(1).sum()
+        return fluency * min(1.0, expects / self.region.k)
 
     def expect(self) -> list[str]:
         return self.decode(self.region.prediction())
@@ -95,6 +108,7 @@ class CorticalNode(Node):
             return []
         out = []
         surprise = float(np.mean(anomalies[1:] or anomalies))
+        self.last_surprise, self.last_text = surprise, text
         if surprise >= self.surprise_level:
             out.append(Signal("surprise", f"новое для меня: «{text[:60]}» (удивление {surprise:.2f})",
                               self.name, salience=0.3 + 0.5 * surprise, confidence=0.8,
