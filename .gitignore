@@ -4,3 +4,6 @@ __pycache__/
 /данные/
 # память разговора `python3 -m light.cli`
 light_state.pkl
+
+# кэш опыта существа (пересоздаётся командой bench)
+/mir_cache/
