@@ -1,7 +1,8 @@
 """Окна вокруг клеток и сжатие повторов (общее для всех обучающихся моделей).
 
 Для каждой клетки берётся окно 5×5 вокруг неё (за краем мира — «земля»), действие «я» и
-метроном: всего 27 чисел. Мир местный (до 2 клеток), поэтому по этим 27 числам следующее
+метроном: 27 чисел; к ним добавлены 20 двоичных «рядом есть X» (по сторонам света и среди
+восьми соседей) — как сложные клетки зрения, которым не важно, с какой именно стороны. Мир местный (до 2 клеток), поэтому по этим 27 числам следующее
 состояние центральной клетки определяется однозначно. Одинаковых окон в опыте огромное
 число (пустое небо!), поэтому повторы сворачиваются в «окно + сколько раз встретилось».
 """
@@ -14,16 +15,18 @@ from .world import GROUND, K
 RAD = 2
 NPOS = 25            # клеток в окне
 CENTER = 12          # номер центральной клетки
-NF = 27              # 25 клеток + действие + метроном
+NF_BASE = 27         # 25 клеток + действие + метроном
 IA, IP = 25, 26      # где в векторе действие и метроном
+POOL4, POOL8 = 27, 27 + K   # «рядом есть X»: по сторонам света (4) и среди всех восьми соседей
+NF = NF_BASE + 2 * K        # 47 признаков
 OFFS = [(dy, dx) for dy in range(-RAD, RAD + 1) for dx in range(-RAD, RAD + 1)]
-DIST = np.array([max(abs(dy), abs(dx)) for dy, dx in OFFS] + [3, 3])  # «расстояние» признака
+DIST = np.array([max(abs(dy), abs(dx)) for dy, dx in OFFS] + [3, 3] + [1] * (2 * K))  # «расстояние» признака
 
 _MUL = (np.random.default_rng(12345).integers(1, 2 ** 62, NF, dtype=np.uint64) * 2 + 1).astype(np.uint64)
 
 
 def patches(g: np.ndarray, a: np.ndarray, ph: np.ndarray) -> np.ndarray:
-    """(N,H,W) -> (N,H,W,27) uint8."""
+    """(N,H,W) -> (N,H,W,47) uint8: окно 5×5, действие, метроном и 20 признаков «рядом есть X»."""
     n, h, w = g.shape
     P = np.pad(g, ((0, 0), (RAD, RAD), (RAD, RAD)), constant_values=GROUND)
     X = np.empty((n, h, w, NF), np.uint8)
@@ -34,6 +37,13 @@ def patches(g: np.ndarray, a: np.ndarray, ph: np.ndarray) -> np.ndarray:
             p += 1
     X[..., IA] = np.asarray(a)[:, None, None]
     X[..., IP] = np.asarray(ph)[:, None, None]
+    up, dn = P[:, RAD - 1:RAD - 1 + h, RAD:RAD + w], P[:, RAD + 1:RAD + 1 + h, RAD:RAD + w]
+    lf, rt = P[:, RAD:RAD + h, RAD - 1:RAD - 1 + w], P[:, RAD:RAD + h, RAD + 1:RAD + 1 + w]
+    diag = [P[:, RAD + dy:RAD + dy + h, RAD + dx:RAD + dx + w] for dy, dx in ((-1, -1), (-1, 1), (1, -1), (1, 1))]
+    for v in range(K):
+        a4 = (up == v) | (dn == v) | (lf == v) | (rt == v)
+        X[..., POOL4 + v] = a4
+        X[..., POOL8 + v] = a4 | (diag[0] == v) | (diag[1] == v) | (diag[2] == v) | (diag[3] == v)
     return X
 
 

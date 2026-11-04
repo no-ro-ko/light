@@ -7,7 +7,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from light.mir import patches, probes, world as W  # noqa: E402
+from light.mir import curious, life, patches, probes, world as W  # noqa: E402
+from light.mir.mlp import PatchMLP  # noqa: E402
+from light.mir.seg import SegCortex  # noqa: E402
 
 
 def run(g, acts, ph0=0):
@@ -141,6 +143,59 @@ class TestProbes(unittest.TestCase):
         self.assertTrue((self.pr.G1T != self.pr.G1I).reshape(len(self.pr), -1).any(1).all())
         again = W.step(self.pr.G0, self.pr.A, self.pr.PH)
         self.assertTrue((again == self.pr.G1T).all())
+
+
+class TestLearners(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.stream = life.wander(1500, seed=5, cache=False)
+        cls.pr = probes.build(seed=99, per_mode=6)
+
+    def test_pooled_features(self):
+        g = W.empty_world()
+        g[5, 5], g[5, 6], g[4, 6] = W.WOOD, W.FIRE, W.WATER   # огонь справа, вода — по диагонали
+        X = patches.patches(g[None], np.array([0]), np.array([0]))[0, 5, 5]
+        self.assertEqual(X[patches.POOL4 + W.FIRE], 1)
+        self.assertEqual(X[patches.POOL4 + W.WATER], 0)      # вода по диагонали — не «по сторонам»
+        self.assertEqual(X[patches.POOL8 + W.WATER], 1)      # но среди восьми соседей
+
+    def test_cortex_learns_gravity_fast(self):
+        S0, A, PH, S1 = (x[:400] for x in self.stream)
+        m = SegCortex(tol=0.8).fit(S0, A, PH, S1)
+        r = probes.evaluate(m, self.pr)
+        self.assertGreaterEqual(r["families"]["падение"], .9)
+        self.assertGreater(r["macro"], .5)
+        self.assertIn("песок → воздух", m.rules_text(top=60, min_weight=1))
+
+    def test_cortex_probabilities_and_sleep(self):
+        S0, A, PH, S1 = (x[:800] for x in self.stream)
+        m = SegCortex(tol=0.8, consolidate=True).fit(S0, A, PH, S1)
+        lp = m.logp(self.pr.G0[:20], self.pr.A[:20], self.pr.PH[:20])
+        self.assertTrue(np.allclose(np.exp(lp).sum(-1), 1, atol=1e-3))
+        self.assertGreater(len(m.rules), 0)
+        self.assertTrue(all(r["n_pos"] >= 2 for r in m.rules))
+        self.assertTrue(m.laws_text())
+
+    def test_incremental_equals_batch_knowledge(self):
+        S0, A, PH, S1 = (x[:600] for x in self.stream)
+        a = SegCortex(tol=0.8).fit(S0, A, PH, S1)
+        b = SegCortex(tol=0.8)
+        for i in range(0, 600, 200):
+            b.partial_fit(S0[i:i + 200], A[i:i + 200], PH[i:i + 200], S1[i:i + 200])
+        self.assertAlmostEqual(probes.evaluate(a, self.pr)["macro"], probes.evaluate(b, self.pr)["macro"], delta=.12)
+
+    def test_mlp_runs_and_normalises(self):
+        S0, A, PH, S1 = (x[:200] for x in self.stream)
+        m = PatchMLP(width=16, steps=120, eval_every=60).fit(S0, A, PH, S1)
+        lp = m.logp(self.pr.G0[:10], self.pr.A[:10], self.pr.PH[:10])
+        self.assertTrue(np.allclose(np.exp(lp).sum(-1), 1, atol=1e-3))
+        self.assertGreater(probes.evaluate(m, self.pr)["macro"], .3)
+
+    def test_curious_day_runs(self):
+        res = curious.live("curious", {"tol": .8}, seed=3, T_max=100, mode="dev", checkpoints=[100])
+        self.assertEqual(len(res), 1)
+        self.assertIn("dev", res[0])
+        self.assertEqual(set(res[0]["second_witness_at"]), set(W.RULE_NAMES.values()))
 
 
 if __name__ == "__main__":
