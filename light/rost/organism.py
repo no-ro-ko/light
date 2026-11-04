@@ -485,11 +485,15 @@ class Organism:
         notes += self.rules.sleep()
         notes += self.measures.fit(self.lang.name)
         for name, st in self.files.items():            # сколько понято в каждом файле — теперь
-            st["понято"] = sum(1 for i, (src, _) in enumerate(self.memory) if src == name and i in self.understood)
+            own = [i for i, (src, _) in enumerate(self.memory) if src == name]
+            st["предложений"] = len(own)
+            st["понято"] = sum(1 for i in own if i in self.understood)
         after, n_after = self.coverage(), self._facts()
         if after > before + 1e-9 or n_after != n_facts:
             notes.append(f"перечитала всю память с выросшим языком: понимаю {after:.0%} предложений "
                          f"вместо {before:.0%}, фактов {n_facts} → {n_after}")
+        seen = set(self.journal)                        # то, что уже было в журнале (давно найденный
+        notes = [x for x in notes if x not in seen]     # закон), — не новость
         self.journal += notes
         return notes
 
@@ -899,16 +903,27 @@ class Organism:
     def my_questions(self) -> list[str]:
         n, out = self.lang.name, []
         out += [f"{d}" for d in self.know.doubts]
-        out += [f"Что значит «{c.word}»? (встретилось в тексте, а определения я не знаю)"
-                for c in self.colors.concepts.values() if c.lo is None]
+        for c in self.colors.concepts.values():         # слово-ощущение («зелёный») без определения
+            if c.lo is not None:
+                continue
+            seen = [ln.split()[-1] for ln in c.told if ln.split()] or [c.word]
+            form = seen[0]
+            if self.lang.lemma(form.replace("ё", "е")) in self.know.predicates:
+                continue                                # «слон большой» — уже понятное свойство
+            out.append(f"Что значит «{self.lang.spelling.get(form, form)}»? (встретилось в тексте, "
+                       f"а определения я не знаю)")
         cnt = Counter()
         where = {}
+        inside = self._speech_lines()
+        frame_lemmas = {self.lang.lemma(f) for f in self.lang.frame_words}
+        from .narrative import ME, POSS, YOU
         for i, (src, s) in enumerate(self.memory):
-            if i in self.understood:
+            if i in self.understood or i in inside:       # прямая речь — сказанное, не рассказ
                 continue
             for w in tokens(s):
                 lem = self.lang.lemma(w)
                 if not self.lang.is_function(w) and not w[0].isdigit() and len(w) > 3 \
+                        and w not in YOU | ME | POSS and lem not in frame_lemmas \
                         and lem not in self.know.concepts and lem not in self.know.predicates:
                     cnt[lem] += 1
                     where.setdefault(lem, s)
@@ -922,6 +937,17 @@ class Organism:
             out.append(f"«{n(c)}» — это кто или что? Я не знаю, к какому роду это относится")
         out += self._story_words()
         out += self.measures.questions(n)
+        return out
+
+    def _speech_lines(self) -> set[int]:
+        """Фразы с прямой речью или внутри неё (кавычка открылась и ещё не закрылась)."""
+        out, depth, src = set(), 0, None
+        for i, (name, s) in enumerate(self.memory):
+            if name != src:
+                depth, src = 0, name
+            if depth > 0 or "«" in s or "»" in s:
+                out.add(i)
+            depth = max(0, depth + s.count("«") - s.count("»"))
         return out
 
     def _story_words(self) -> list[str]:
