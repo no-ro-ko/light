@@ -254,7 +254,9 @@ python3 -m unittest discover tests
 | [docs/CORTEX.md](docs/CORTEX.md) | корковая сеть |
 | [docs/SEMA.md](docs/SEMA.md) | нейросеть смыслов |
 
-Лицензия в репозитории пока не указана.
+### Лицензия
+
+[MIT](LICENSE): код и тексты можно свободно использовать, менять и распространять, в том числе в коммерческих проектах, если сохранить уведомление об авторстве и текст лицензии. Без каких-либо гарантий.
 
 ---
 
@@ -510,4 +512,6 @@ python3 -m unittest discover tests
 | [docs/CORTEX.md](docs/CORTEX.md) | the cortex network |
 | [docs/SEMA.md](docs/SEMA.md) | the neural network of meanings |
 
-No license has been specified for this repository yet.
+### License
+
+[MIT](LICENSE): you may use, change and distribute the code and texts freely, including in commercial projects, as long as you keep the copyright notice and the license text. No warranty of any kind.
