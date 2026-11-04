@@ -36,6 +36,11 @@ SUBJ = {"он", "она", "оно", "они"}
 OBJ = {"его", "ее", "их"}
 KIN = {"он": {"он"}, "она": {"она"}, "оно": {"оно"}, "они": {"они"},      # «его» — он или оно
        "его": {"он", "оно"}, "ее": {"она"}, "их": {"они"}}
+# притяжательные — служебные, как местоимения (врождённое): «свой мяч» — мяч, а не «свой»
+POSS = {"свой", "своя", "свое", "свои", "своего", "своей", "своему", "своим", "своих", "свою",
+        "мой", "моя", "мое", "мои", "моего", "моей", "моему", "моим", "моих", "мою",
+        "твой", "твоя", "твое", "твои", "твоего", "твоей", "твоему", "твоим", "твоих", "твою",
+        "наш", "наша", "наше", "наши", "нашего", "нашей", "нашу", "ваш", "ваша", "ваше", "ваши"}
 LINK = {"и", "а", "но", "да", "или", "зато"}
 SEP = {",", ";", "—", "(", ")"}
 SAID = {"что", "чтобы", "будто", "который", "которая", "которое", "которые", "которого", "которую",
@@ -88,21 +93,28 @@ class Narrator:
         self.heroes: set[str] = set()                      # леммы: герои простых историй
         self.after_prep: set[str] = set()                  # формы, стоявшие после предлога («на стол»)
         self.verb_last: dict[str, set] = defaultdict(set)  # последняя буква действий
+        self.adverbs: set[str] = set()                     # «однажды», «рядом», «давно»: обстоятельства
+        self.after_attr: set[str] = set()                  # формы, стоявшие после признака: «маленький щенок»
         self._attr: tuple | None = None
         self._acts: set[str] = set()
         self._place: set[str] = set()
         self._marks: set[str] = set()
+        self._story_heroes: set[str] = set()               # кто уже действовал в этом рассказе
+        self._described: set[str] = set()
 
     def __getstate__(self):
         d = dict(self.__dict__)
         d["_attr"], d["_acts"], d["_place"], d["_marks"] = None, set(), set(), set()
+        d.pop("_fam", None)
         d["pron_tails"] = {k: dict(v) for k, v in self.pron_tails.items()}
         d["noun_tails"] = {k: dict(v) for k, v in self.noun_tails.items()}
         return d
 
     def __setstate__(self, d):
         self.__dict__.update(d)
-        for key, v in (("heroes", set()), ("after_prep", set()), ("_place", set()), ("_marks", set())):
+        for key, v in (("heroes", set()), ("after_prep", set()), ("_place", set()), ("_marks", set()),
+                       ("adverbs", set()), ("_story_heroes", set()), ("after_attr", set()),
+                       ("_described", set())):
             self.__dict__.setdefault(key, v)
         self.__dict__["verb_last"] = defaultdict(set, d.get("verb_last", {}))
         for key in ("pron_tails", "noun_tails"):
@@ -153,6 +165,7 @@ class Narrator:
     def _prepare(self, org) -> None:
         self._acts = org.story_actions()
         self._place = {org.lang.lemma(w) for w in self.after_prep}   # «стол»: стояло после «на»
+        self._described = {org.lang.lemma(w) for w in self.after_attr}  # «щенок»: стоял после «маленький»
         self._attr = self._attributes(org)
         # род по последней букве — обобщение: у кого из знакомых героев «-а» в конце, те чаще «она»
         self._letters: dict[str, Counter] = defaultdict(Counter)
@@ -162,20 +175,37 @@ class Narrator:
                 self._letters[org.name(key)[-1:]][k] += 1
         self._names = org.name
         self._marks = self._marked_tails(org)
-        # окончания знакомых названий («рыбой», «птицей», «молоком») — чтобы узнать название по форме
+        # согласная, на которой держится «кто действовал»: «-ла» (она) → «л»; её соседи — «-л», «-ло», «-ли»
+        self._gcons = {t[0] for t in self._marks if len(t) == 2 and t[1] in VOWELS and t[0] not in VOWELS}
+        # окончания знакомых названий («рыбой», «птицей», «молоком») и знакомых действий («плавать»,
+        # «летает» — из «рыба умеет плавать») — чтобы узнать незнакомое слово по форме
         self._noun_ends: dict[str, set] = defaultdict(set)
+        self._verb_ends: dict[str, set] = defaultdict(set)
+        nom, obl = set(), set()                            # «лиса» — начальная; «лису», «птицей» — нет
         for f in org.lang.forms:
             if len(f) > 3 and not org.lang.is_function(f) and self.known_noun(org, f):
+                (obl if self.oblique(org, f) else nom).add(f[-2:])
+        self._oblique_ends = obl - nom
+        attrs = self._attr[0] if self._attr else set()
+        for f in org.lang.forms:
+            if len(f) <= 3 or org.lang.is_function(f):
+                continue
+            L = org.lang.lemma(f)
+            if self.known_noun(org, f):
                 self._noun_ends[f[-2:]].add(f)
+            elif L in org.know.predicates and L not in attrs and L not in org.know.concepts:
+                self._verb_ends[f[-2:]].add(f)
 
     # ---------- что знает о словах ----------
     def known_noun(self, org, w: str) -> bool:
         """Название — если о нём что-то сказано, если это герой простой истории или если слово
         (в какой-то форме) стояло после предлога: «на стол», «по полу», «с молоком»."""
         L = org.lang.lemma(w)
-        if L in org.know.predicates and L not in org.know.concepts:
+        if L in getattr(self, "_story_heroes", ()):          # «Жил-был щенок… Щенок толкнул мяч»
+            return True
+        if L in org.know.predicates and L not in org.know.concepts or w in self.adverbs:
             return False
-        return L in org.know.concepts or L in self.heroes or L in self._place \
+        return L in org.know.concepts or L in self.heroes or L in self._place or L in self._described \
             or org.lang.hints.get(w) == "noun"
 
     def _attributes(self, org):
@@ -219,7 +249,8 @@ class Narrator:
             return None
         base = w[:-2] if w.endswith(("ся", "сь")) and len(w) > 5 else w
         n = len(getattr(self, "_noun_ends", {}).get(w[-2:], ()))
-        v = len(self.verbs.get(w[-2:], ())) + (len(self.verbs.get(base[-2:], ())) if base != w else 0)
+        v = len(self.verbs.get(w[-2:], ())) + (len(self.verbs.get(base[-2:], ())) if base != w else 0) \
+            + len(getattr(self, "_verb_ends", {}).get(w[-2:], ()))
         if n >= 2 and n > 2 * v:
             return "N?"
         if v >= 2 and v > 2 * n:
@@ -250,14 +281,29 @@ class Narrator:
     # ---------- опоры: «<известное название> <действие> [<кого/что>]» ----------
     def learn(self, org, sentences: list[str]) -> None:
         self._prepare(org)
+        self._fam = Counter(org.lang.lemma_of.values())
+        self._anchors(org, sentences)
+        self._marks = self._marked_tails(org)
+        self._places(org, sentences)
+        self._learn_adverbs(org, sentences)                 # «однажды», «рядом», «давно»
+        if self.adverbs:                                    # и опоры заново — уже без них
+            for d in (self.verbs, self.agents, self.patients, self.verb_last):
+                d.clear()
+            self.pron_tails.clear()
+            self.noun_tails.clear()
+            self._anchors(org, sentences)
+            self._marks = self._marked_tails(org)
+
+    def _anchors(self, org, sentences: list[str]) -> None:
         for s in sentences:
             for seg in self._segments(self._cut(lex(s))):
-                ws = [w for w in seg if w not in SOFT]
+                ws = [w for w in seg if w not in SOFT and w not in self.adverbs and w not in POSS]
                 k = next((i for i, w in enumerate(ws[:3]) if w in SUBJ or self.known_noun(org, w)), None)
                 # «кто» — в начале части (перед ним — разве что признаки: «Хитрая лиса подошла»);
                 # «толкнул кувшин лапой» — не опора: «кувшин» здесь — над кем действуют
-                if k is None or k + 1 >= len(ws) or any(not self.is_attr(org, w) for w in ws[:k]):
-                    continue
+                if k is None or k + 1 >= len(ws) or any(not self.is_attr(org, w) for w in ws[:k]) \
+                        or ws[k] not in SUBJ and self.oblique(org, ws[k]):
+                    continue                               # «Вороне где-то…» — не «кто»
                 v = ws[k + 1]
                 if v in PREPS or v in OBJ or v in SUBJ or v == "не" or org.lang.is_function(v) \
                         or self.known_noun(org, v) or self.is_attr(org, v) or v[0].isdigit():
@@ -275,6 +321,49 @@ class Narrator:
                     self.agents[case_key(ws[k])].add(ws[k])
                 if k + 2 < len(ws) and self.known_noun(org, ws[k + 2]):
                     self.patients[case_key(ws[k + 2])].add(ws[k + 2])
+
+    def _inflects(self, org, w: str) -> bool:
+        """У слова встречались разные формы («лисица/лисицу») — значит, не наречие: наречия не меняются."""
+        if not hasattr(self, "_fam"):
+            self._fam = Counter(org.lang.lemma_of.values())
+        return self._fam.get(org.lang._base(w), 0) >= 2
+
+    def verbish(self, org, w: str) -> bool:
+        """Похоже на действие: знакомое действие, окончание действий или форма «что случилось» («стоял»)."""
+        return self.verb_evidence(org, w) >= 2 or self.marked(w)
+
+    def _learn_adverbs(self, org, sentences: list[str]) -> None:
+        """Обстоятельство — слово перед явным «кто → действие» или между ними, которое само ни то, ни
+        другое: «Однажды ворона нашла», «Вечером девочка сидела», «кот давно хотел»."""
+        for s in sentences:
+            for seg in self._segments(self._cut(lex(s))):
+                ws = [w for w in seg if w not in SOFT]
+                in_place = {j for i, w in enumerate(ws) if w in PREPS for j in (i + 1, i + 2)}
+                subj = next((i for i, w in enumerate(ws) if i not in in_place and (w in SUBJ or (
+                             self.known_noun(org, w) and not self.oblique(org, w)))), None)
+                if subj is None:
+                    continue
+                verb = next((i for i in range(subj + 1, min(len(ws), subj + 4)) if self.verbish(org, ws[i])), None)
+                if verb is None:                            # только ясный порядок «кто → действие»
+                    continue
+                cand = ws[:subj] + ws[subj + 1:verb]
+                for i, w in enumerate(cand):
+                    if any(x in PREPS for x in cand[max(0, i - 2):i + 1]) or self._inflects(org, w) \
+                            or org.lang.is_function(w) or w in POSS \
+                            or self.is_attr(org, w) or self.known_noun(org, w) or self.verbish(org, w) \
+                            or w[0].isdigit() or w in SEP or len(w) < 3:
+                        continue
+                    self.adverbs.add(w)
+
+    def _places(self, org, sentences: list[str]) -> None:
+        for s in sentences:                                # после признака — название: «маленький щенок»
+            toks = [w for w in self._cut(lex(s)) if w not in SOFT]
+            for a, b in zip(toks, toks[1:]):
+                if self.is_attr(org, a) and not org.lang.is_function(a) and b not in PREPS and b not in SEP \
+                        and b not in LINK and not org.lang.is_function(b) and not b[0].isdigit() \
+                        and not self.is_attr(org, b) and self.verb_evidence(org, b) < 2:
+                    self.after_attr.add(b)
+        self._described = {org.lang.lemma(w) for w in self.after_attr}
         for s in sentences:                                # после предлога — название (уже зная действия)
             toks = [w for w in self._cut(lex(s)) if w not in SOFT]
             for n, a in enumerate(toks):
@@ -291,7 +380,6 @@ class Narrator:
                 if run and not (len(run) == 2 and len(toks) > n + 3 and toks[n + 3] not in SEP | LINK | PREPS):
                     self.after_prep.add(run[-1])
         self._place = {org.lang.lemma(w) for w in self.after_prep}
-        self._attr = None
 
     # ---------- фразы → части ----------
     @staticmethod
@@ -322,6 +410,10 @@ class Narrator:
             nxt = ws[i + 1] if i + 1 < len(ws) else ""
             if w in SUBJ:
                 c = "S"
+            elif w in POSS or w in self.adverbs and not self.known_noun(org, w):
+                c = "F"                                    # «свой», «однажды», «давно»
+            elif w in OBJ and nxt and (self.known_noun(org, nxt) or self.is_attr(org, nxt)):
+                c = "F"                                    # «его мяч» — чей, а не кого
             elif w in OBJ:
                 c = "O"
             elif w in PREPS:
@@ -330,6 +422,9 @@ class Narrator:
                 c = "NEG"
             elif org.lang.is_function(w) or w[0].isdigit():
                 c = "F"
+            elif self.oblique(org, w) and nxt and nxt not in PREPS and not org.lang.is_function(nxt) \
+                    and self._attr and self._attr[1][w[-2:]] >= 2 and self.verb_evidence(org, nxt) < 2:
+                c = "A"                                    # «сырный дух»: от «сыр», но окончание признака
             elif self.known_noun(org, w):
                 c = "N"
             elif self.verb_evidence(org, w) >= 2 or w in self.verbs.get(w[-2:], ()):
@@ -338,10 +433,19 @@ class Narrator:
                 c = "A"
             else:
                 c = self._by_ending(w)                     # «лапой» — как «рыбой»; «разлилось» — как «обрадовалась»
+                if c is None and self.marked(w):
+                    c = "V?"                               # «стоял», «жил-был»: форма того, что случилось
                 if c is None:
                     wc = org.syntax.word_class(org.lang, org.know, w)
                     c = "N?" if wc == "noun" else "V?" if wc == "pred" else "U"
             out.append((w, c))
+        for i, (w, c) in enumerate(out):                   # незнакомое слово по соседству:
+            if c != "U":
+                continue
+            prev = out[i - 1][1] if i else ""
+            rest = [cc for _, cc in out[i + 1:] if cc not in ("F",)]
+            if prev == "A" or (prev in ("V", "V?") and not rest):
+                out[i] = (w, "N?")                         # «маленький щенок», «жил-был щенок»
         return out
 
     # ---------- одна часть фразы → событие ----------
@@ -367,7 +471,7 @@ class Narrator:
                 continue
             core.append((w, c))
             k += 1
-        groups = self._groups(core)
+        groups = self._groups(core, org)
         for g in groups:                                   # кто упомянут — тот на сцене
             scene.mention(self.refer(org, org.lang.lemma(core[g[1]][0]), scene))
         verbs = [n for n, (_, c) in enumerate(core) if c in ("V", "V?")]
@@ -381,8 +485,21 @@ class Narrator:
         strong = [n for n in verbs if core[n][1] == "V"]
         if not verbs:
             return None
-        # кто: местоимение; иначе — по лестнице предпочтений (порядок слов в русском свободный)
+        # что делает: в подряд идущих действиях главное — последнее («стала хвалить»)
         first_v = (strong or verbs)[0]
+        run, k = [first_v], first_v + 1
+        while k < len(core):
+            if core[k][1] in ("V", "V?", "U") and not any(g[0] <= k <= g[2] for g in groups):
+                run.append(k)
+            elif not (core[k][1] == "O" and k + 1 < len(core) and core[k + 1][1] in ("V", "V?")):
+                break                                      # «стала его хвалить» — идём дальше
+            k += 1
+        cands = [n for n in run if core[n][1] == "V"] or [n for n in run if core[n][1] == "V?"] or run
+        desire = next((n for n in cands if org.name(org.lang.lemma(core[n][0])).startswith("хоч")), None)
+        main = desire if desire is not None else cands[-1]
+        neg = main > 0 and core[main - 1][1] == "NEG"
+        vcls = self.past_class(core[run[0]][0]) or self.past_class(core[main][0])
+        # кто: местоимение; иначе — по лестнице предпочтений (порядок слов в русском свободный)
         subj, subj_form, obj_group = None, None, None
         before = [g for g in groups if g[0] < first_v]
         after = [g for g in groups if g[0] > first_v]
@@ -396,6 +513,10 @@ class Narrator:
 
         def known(g):
             return core[g[1]][1] == "N"
+
+        def agrees(g):                                     # «а сыр во рту держала»: сыр «выпал» — не он
+            ncls = self.noun_class(self.refer(org, org.lang.lemma(head(g)), scene))
+            return vcls is None or ncls is None or ncls == vcls
 
         def first(groups_, *tests):
             return next((g for g in groups_ if all(t(g) for t in tests)), None)
@@ -412,14 +533,35 @@ class Narrator:
             subj = inherited                               # «…и крепко держала сыр»: тот же герой
             obj_group = after[0] if after else None
         else:
-            sg = (first(before, plain, known)              # «Голодный кот давно хотел…»
-                  or first(after, plain, known)            # «Мимо бежала лиса», «Рядом стоял мальчик»
-                  or first(before, plain)
-                  or first(after, plain)                   # «На краю стола стоял кувшин»
-                  or (before[0] if before else None))
+            def nom(g):                                    # может быть «кто»: начальная форма, не «хвостом»
+                return not self.obliquish(org, head(g))
+
+            def strong(g):
+                return self.strong_noun(head(g))
+
+            def go_on():                                   # тот же герой, что действовал перед этим
+                if not scene.agent:
+                    return False
+                c = self.noun_class(scene.agent)
+                return vcls is None or c is None or c == vcls
+
+            sg = (first(before, plain, known, agrees)      # «Голодный кот давно хотел…»
+                  or first(before, nom, strong, agrees)    # «Лисица видит сыр» (как «птица»)
+                  or first(after, nom, known, agrees)      # «Мимо бежала лиса», «Рядом стоял мальчик»
+                  or first(after, nom, strong, agrees))    # «На краю стола стоял кувшин»
+            if sg is None and go_on():                     # «Позавтракать было совсем уж собралась»,
+                sg = "тот же"                              # «И говорит так сладко»: она же, лиса же
             if sg is None:
-                subj = inherited or scene.agent            # «Стала хвалить ворону» — тот же герой
-                obj_group = after[0] if after else None
+                sg = (first(before, plain, agrees) or first(after, nom, agrees) or first(before, agrees))
+            if sg == "тот же":
+                subj = scene.agent
+                obj_group = after[0] if after else (before[0] if before else None)
+                sg = "done"
+            if sg == "done":
+                pass
+            elif sg is None:                               # «Стала хвалить ворону», «а сыр во рту держала» —
+                subj = inherited or scene.agent            # тот же герой; названное — над чем действуют
+                obj_group = after[0] if after else (before[0] if before else None)
             else:
                 subj_form = head(sg)
                 subj = self.refer(org, org.lang.lemma(subj_form), scene)
@@ -427,18 +569,6 @@ class Narrator:
                 obj_group = rest[0] if rest else None
         if subj is None:
             return None
-        # что делает: в подряд идущих действиях главное — последнее («стала хвалить»)
-        run, k = [first_v], first_v + 1
-        while k < len(core):
-            if core[k][1] in ("V", "V?", "U") and not any(g[0] <= k <= g[2] for g in groups):
-                run.append(k)
-            elif not (core[k][1] == "O" and k + 1 < len(core) and core[k + 1][1] in ("V", "V?")):
-                break                                      # «стала его хвалить» — идём дальше
-            k += 1
-        cands = [n for n in run if core[n][1] == "V"] or [n for n in run if core[n][1] == "V?"] or run
-        desire = next((n for n in cands if org.name(org.lang.lemma(core[n][0])).startswith("хоч")), None)
-        main = desire if desire is not None else cands[-1]
-        neg = main > 0 and core[main - 1][1] == "NEG"
         # кого/что
         obj, obj_form = None, None
         o_pron = next((n for n, (w, c) in enumerate(core) if c == "O" and n > first_v - 2), None)
@@ -456,7 +586,7 @@ class Narrator:
         return Event(subj, org.lang.lemma(core[main][0]), obj if obj != subj else None, i_sent,
                      (subj_form or org.name(subj), core[main][0], obj_form))
 
-    def _groups(self, core) -> list[tuple[int, int, int]]:
+    def _groups(self, core, org=None) -> list[tuple[int, int, int]]:
         """Группы названий: (начало, главное слово, конец). Признаки — перед главным; из двух
         названий подряд главное — знакомое («однажды ворона»), иначе первое («кусок сыра»)."""
         out, k = [], 0
@@ -468,6 +598,10 @@ class Narrator:
                 nouns = [n for n in range(k, j) if core[n][1] in ("N", "N?")]
                 split = next((n for n in nouns[1:] if self.agentive(core[n][0]) < 1
                               and len(self.patients.get(case_key(core[n][0]), ())) >= 2), None)
+                if split is None and org is not None and len(nouns) >= 2 \
+                        and self.oblique(org, core[nouns[0]][0]) and self.agentive(core[nouns[0]][0]) < 1 \
+                        and not self.obliquish(org, core[nouns[1]][0]):
+                    split = nouns[1]                       # «Лисицу | сыр (пленил)»: кого — и кто
                 if split is not None:                      # «сырный дух | Лису (остановил)»
                     j = split
                     nouns = [n for n in nouns if n < split]
@@ -496,6 +630,7 @@ class Narrator:
     def events(self, org, items: list[tuple[int, str]]) -> list[Event]:
         from .causes import CauseField
         self._prepare(org)
+        self._story_heroes = set()
         scene, out, depth = Scene(), [], 0
         for i, s in items:
             lead = len(s) - len(s.lstrip("»” "))              # кавычка закрылась в самом начале
@@ -515,20 +650,26 @@ class Narrator:
                     continue
                 inherited = ev.agent
                 scene.agent = ev.agent
+                if ev.forms[0] not in SUBJ:
+                    self._story_heroes.add(ev.agent)       # «Жил-был щенок» → дальше «щенок» знаком
                 for x in (ev.agent, ev.obj):
                     if x:
                         scene.mention(x)
                         scene.core.append(x)
                 out.append(ev)
         self._attr = None
+        self._story_heroes = set()
         return out
 
     def _marked_tails(self, org) -> set[str]:
         """Окончания, по которым видно, кто действовал: бывают только при одном из местоимений
         («она села» → «-ла»); и их «соседи» по семье форм: есть «хотела» и «хотел» — значит,
         «-л» тоже такое окончание (о другом герое)."""
+        def solid(t):                                      # «-о», «-а» — слишком общее («долго», «тихо»)
+            return len(t) == 2 or t not in VOWELS
+
         own = {t for p, tt in self.pron_tails.items() for t, forms in tt.items() if len(forms) >= 2
-               and sum(1 for q in self.pron_tails.values() if q.get(t)) == 1}
+               and sum(1 for q in self.pron_tails.values() if q.get(t)) == 1 and solid(t)}
         out = set(own)
         forms = set(org.lang.forms)
         for f in forms:
@@ -536,13 +677,43 @@ class Narrator:
             if len(base) > 3 and base[-2:] in own:
                 for sib in (base[:-1], base[:-1] + "о", base[:-1] + "и"):
                     if sib in forms or sib + "ся" in forms or sib + "сь" in forms:
-                        out |= set(tails(sib))
+                        out |= {t for t in tails(sib) if solid(t)}
         return out
+
+    def past_class(self, v: str) -> str | None:
+        """Какой «род» у формы действия: «держала» → «ла», «выпал» → «л», «лает» → неизвестно (так
+        говорят о любом)."""
+        base = v[:-2] if v.endswith(("ся", "сь")) and len(v) > 4 else v
+        g = getattr(self, "_gcons", set())
+        if len(base) > 2 and base[-1] in g:
+            return base[-1]
+        if len(base) > 3 and base[-2] in g and base[-1] in VOWELS:
+            return base[-2:]
+        return None
+
+    def noun_class(self, key: str) -> str | None:
+        """«Род» героя — по формам его действий: «сыр выпал» → «л», «лиса бежала» → «ла»."""
+        votes = Counter()
+        for forms in self.noun_tails.get(key, {}).values():
+            for v in forms:
+                c = self.past_class(v)
+                if c:
+                    votes[c] += 1
+        return votes.most_common(1)[0][0] if votes else None
 
     def marked(self, form: str) -> bool:
         """Форма действия, по которой видно, кто действовал («села» — она, «сел» — он): так говорят
         о том, что случилось, а не о том, что бывает всегда («киты дышат»)."""
-        return any(t in self._marks for t in tails(form))
+        return any(t in self._marks for t in tails(form)) or self.past_class(form) is not None
+
+    def obliquish(self, org, w: str) -> bool:
+        """Похоже на «не-кто» форму: не начальная форма или окончание, какое бывает только у таких
+        форм («хвостом», «животным»)."""
+        return self.oblique(org, w) or w[-2:] in getattr(self, "_oblique_ends", set())
+
+    def strong_noun(self, w: str) -> bool:
+        """Незнакомое слово с окончанием, как у знакомых названий («лисица» — как «птица»)."""
+        return self._by_ending(w) == "N?"
 
     def is_story(self, events: list[Event]) -> bool:
         """Рассказ: о случившемся (формы действий — «села», «упал») и герои меняются ролями —
