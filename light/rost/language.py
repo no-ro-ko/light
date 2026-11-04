@@ -66,6 +66,7 @@ class TextLanguage:
         self.journal: list[str] = []
         self._families: set[str] = set()
         self._singles: set[str] = set()
+        self.ending_role: dict[str, str] = {}
         self._guess: dict[str, str] = {}
         self.first: Counter = Counter()               # сколько раз форма открывала фразу
         # подсказки из знаний: форма стояла на месте «кто» (название) или «какой/что делает»;
@@ -114,6 +115,14 @@ class TextLanguage:
                 if len(family) > best_size or (len(family) == best_size and best_size >= 2 and len(stem) > len(best)):
                     best, best_size = stem, len(family)
             self.lemma_of[w] = best if best_size >= 2 else w
+        # какие окончания у действий, а какие у названий (по ролям, известным из знаний)
+        er: dict[str, Counter] = defaultdict(Counter)
+        for f, lem in self.lemma_of.items():
+            r = self.role(f)
+            if r and f.startswith(lem) and f != lem:
+                er[f[len(lem):]][r] += 1
+        self.ending_role = {e: c.most_common(1)[0][0] for e, c in er.items()
+                            if c.most_common(1)[0][1] >= 2 and c.most_common(1)[0][1] >= 0.8 * sum(c.values())}
         fam = Counter(self.lemma_of.values())
         self._families = {L for L, k in fam.items() if k >= 2 and len(L) >= 4}
         # слова, встреченные пока в одной форме, — тоже основа для узнавания новых форм,
@@ -173,8 +182,48 @@ class TextLanguage:
                 close = n >= 4 or (n >= 3 and tail in self.endings)   # «дыш-ит» ~ «дыша-т»
                 if close and n >= len(L) - 1 and len(tail) <= 3 and (best == w or len(L) > len(best)):
                     best = L
+        if best == w and len(w) >= 3 and not self.is_function(w):
+            best = self._alternation(w)
         self._guess[w] = best
         return best
+
+    def _splits(self, f: str):
+        """Основа + выученное окончание (в том числе нулевое)."""
+        for k in range(0, 4):
+            s, e = (f, "") if k == 0 else (f[:-k], f[-k:])
+            if len(s) >= 2 and (e in self.endings or e == ""):
+                yield s, e
+
+    def _alternation(self, w: str) -> str:
+        """Чередования: беглая гласная («орл-ы» ~ «ор(е)л», «дн-я» ~ «д(е)нь», «льв-ы» ~ «л(е)в»)
+        и короткие основы глаголов («да-ет» ~ «да-ют»)."""
+        def compatible(f):
+            return not (self.role(w) and self.role(f) and self.role(w) != self.role(f))
+
+        def variants(s):
+            out = [s[:-1] + v + s[-1] for v in "ое"] if len(s) >= 2 else []
+            if "ь" in s:
+                out.append(s.replace("ь", "е", 1))
+            return out
+
+        for f in self.forms:
+            if f == w or len(f) < 3 or self.is_function(f) or not compatible(f):
+                continue
+            for s, _ in self._splits(f):                    # w длиннее: «орел» от основы «орл»
+                for cand in variants(s):
+                    if w.startswith(cand) and (w[len(cand):] in self.endings or w[len(cand):] == ""):
+                        return self.lemma_of.get(f, f)
+            for s, _ in self._splits(w):                    # w короче: «орлы» от «орел»
+                for cand in variants(s):
+                    if f.startswith(cand) and (f[len(cand):] in self.endings or f[len(cand):] == ""):
+                        return self.lemma_of.get(f, f)
+            n = 0                                            # короткие основы глаголов
+            while n < min(len(f), len(w)) and f[n] == w[n]:
+                n += 1
+            if n >= 2 and self.ending_role.get(w[n:]) == "pred" and self.ending_role.get(f[n:]) == "pred" \
+                    and self.role(f) == "pred":
+                return self.lemma_of.get(f, f)
+        return w
 
     def name(self, lemma: str) -> str:
         return self.display.get(lemma, lemma)
