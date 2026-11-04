@@ -26,6 +26,7 @@ from .language import COPULA, NEG, TextLanguage, split_sentences, tokens
 from .measures import MeasureField, extract
 from .rules import Ev, RuleField, moral, unknown_word, what_if_not, why_did, why_happened
 from .syntax import COPULA as SYN_COPULA, PREPS, SOFT, Syntax
+from .causes import CauseField, Sit
 
 
 class Organism:
@@ -45,7 +46,9 @@ class Organism:
         self.journal: list[str] = []
         self.last_motive = None
         self.events: set[int] = set()
+        self._subject_words = None
         self.syntax = Syntax()
+        self.causes = CauseField()
         self.compounds: dict[str, tuple[str, list[str]]] = {}   # «синий кит» → (кит, [синий])
         self.some: dict[tuple, list[str]] = {}                   # «некоторые птицы не летают»
         self.know.name = self.name
@@ -131,6 +134,13 @@ class Organism:
                     self.measures.add(row, order, source)
                     self.understood.add(i)
                 continue
+            pair = CauseField.split(s) if self._complex_ok else None
+            if pair:                                    # «если …, то …», «… потому что …»
+                cause = self.situation(pair[0])
+                effect = self.situation(pair[1], prev=self._subject_words)
+                self.causes.learn(cause, effect, source)
+                self.understood.add(i)
+                continue
             f = self.lang.parse(toks, self.know.is_category)
             if f:
                 kind, x, y, pol = f
@@ -197,6 +207,25 @@ class Organism:
                     told += 1
         return told
 
+    def situation(self, text: str, prev: list[str] | None = None) -> Sit:
+        """Положение дел: кто и что с ним; если не разобрать — набор слов."""
+        toks = tokens(text)
+        bag = frozenset(self.lang.lemma(w) for w in toks if not self.lang.is_function(w) and w != "не")
+        neg = "не" in toks
+        clauses, _ = self.syntax.clauses(text, self.lang, self.know, prev)
+        self._subject_words = clauses[0].subject if clauses else prev
+        if toks and toks[0] in ("он", "она", "оно", "они") and prev:
+            text = " ".join(prev + toks[1:])               # «она падает» → «ваза падает»
+        for c in clauses:
+            subj = self.concept(c.subject)
+            for kind, x, y, pol in self._interpret(subj, c):
+                if kind == "prop" and " " not in y or kind == "prop":
+                    return Sit(x, y, not pol, bag, text)
+        return Sit(None, None, neg, bag, text)
+
+    def _isa(self, a: str, b: str) -> bool:
+        return b in {c for lvl in self.know.ancestors(a) for c, _ in lvl}
+
     def _interpret(self, subj: str, c) -> list[tuple]:
         toks = ["<x>"] + c.rest
         f = self.lang.parse(toks, self.know.is_category)
@@ -242,6 +271,7 @@ class Organism:
         self.colors = Grounder()
         self.definitions = {}
         self.syntax = Syntax()
+        self.causes = CauseField()
         self.compounds, self.some, self._prev = {}, {}, None
         self.lang.weak_next = {}                        # слабые подсказки — заново, с выросшим языком
         self.know.name = self.name
@@ -326,13 +356,24 @@ class Organism:
                     self.last_motive = motive
                     return text.capitalize() + f". (из истории в «{src}»)"
             return "Я не нашла истории, где бы это было, или не понимаю, к чему это вело."
-        m = re.match(r"почему\s+(\w+)\s+(\w+)", t)
+        m = re.match(r"почему\s+(.+)$", t)
         if m:
-            for src, st in reversed(self.stories):
-                ans = why_happened(self.rules, st, m.group(1), m.group(2))
-                if not ans.startswith(("в этой истории", "не вижу")):
-                    return ans.capitalize() + "."
-            return "Не вижу причины в известных мне историях."
+            words = m.group(1).split()
+            if len(words) >= 2:
+                for src, st in reversed(self.stories):
+                    ans = why_happened(self.rules, st, words[0], words[1])
+                    if not ans.startswith(("в этой истории", "не вижу")):
+                        return ans.capitalize() + "."
+            chain = self.causes.why(self.situation(m.group(1)), self._isa, self.name)
+            if chain:
+                return "Потому что: " + "; а ".join(chain) + "."
+            return "Не вижу причины ни в историях, ни в том, что я читала."
+        m = re.match(r"что (?:будет|случится|произойдет|станет)(?: с \w+)?\s+если\s+(.+)$", t)
+        if m:
+            effects = self.causes.what_if(self.situation(m.group(1)), self._isa, self.name)
+            if effects:
+                return "Тогда: " + " → ".join(effects) + "."
+            return "Не знаю, к чему это приводит: о таком я не читала."
         m = re.match(r"что было бы если бы\s+(\w+)\s+не\s+(\w+)", t)
         if m:
             unk = unknown_word(self.rules, m.group(1), m.group(2))
