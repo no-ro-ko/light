@@ -244,3 +244,111 @@ NEW = [
     ["пёс толкает санки", "санки едут"],
     ["дедушка хвалит внука", "внук радуется"],
 ]
+
+
+# ================= смысл истории: зачем / почему / что было бы, если =================
+def say(e: Ev) -> str:
+    return " ".join(w for w in (e.agent, e.action, e.obj) if w)
+
+
+def consequences(field: RuleField, start: Ev, state: list[Ev], blocked: set = frozenset(),
+                 depth: int = 8) -> list[tuple[Ev, Ev | None]]:
+    """Мысленно развернуть последствия события по выученным правилам."""
+    chain, cur, state = [], start, list(state) + [start]
+    for _ in range(depth):
+        step = None
+        for rule in sorted(field.rules, key=lambda r: -field.rules[r].get("надёжность", 1.0)):
+            nxt = RuleField.fire(rule, cur, state)
+            if nxt and nxt not in blocked and nxt not in state:
+                cond = None
+                if rule.cond:
+                    cond = next((e for e in reversed(state) if e.action == rule.cond[0]), None)
+                step = (nxt, cond)
+                break
+        if not step:
+            break
+        chain.append(step)
+        state.append(step[0])
+        cur = step[0]
+    return chain
+
+
+def find(story: list[Ev], agent: str, action: str, field: RuleField) -> Ev | None:
+    known = list(field.verbs)
+    a, v = field._norm(agent, list(field.entities)), field._norm(action, known)
+    return next((e for e in story if e.agent == a and e.action == v), None)
+
+
+def unknown_word(field: RuleField, agent: str, action: str) -> str | None:
+    """Если такого слова не было ни в одной истории — честно сказать об этом."""
+    for w, pool in ((agent, field.entities), (action, field.verbs)):
+        if field._norm(w, list(pool)) not in pool:
+            return w
+    return None
+
+
+def why_did(field: RuleField, story: list[Ev], agent: str, action: str) -> tuple[str, tuple | None]:
+    act = find(story, agent, action, field)
+    if not act:
+        return "в этой истории такого не было", None
+    desires = [e for e in story if e.agent == act.agent and e.action.startswith("хоч")]
+    state = story[:story.index(act)]
+    chain = consequences(field, act, state)
+    for d in desires:
+        for i, (e, _) in enumerate(chain):
+            if e.agent == act.agent and e.obj == d.obj:
+                steps = [say(act)] + [say(ev) + (f" (ведь {say(c)})" if c else "") for ev, c in chain[:i + 1]]
+                return (f"чтобы получить {d.obj}: {act.agent} хочет {d.obj}, и это ведёт к цели: "
+                        + " → ".join(steps)), (act, d, chain[:i + 1])
+    return f"не вижу, к какому желанию «{act.agent}» это ведёт", None
+
+
+def why_happened(field: RuleField, story: list[Ev], agent: str, action: str) -> str:
+    target = find(story, agent, action, field)
+    if not target:
+        return "в этой истории такого не было"
+    causes, cur = [], target
+    for _ in range(8):
+        before = story[:story.index(cur)]
+        found = None
+        for prev in reversed(before):
+            for rule in field.rules:
+                if RuleField.fire(rule, prev, before[:before.index(prev)]) == cur:
+                    cond = next((e for e in before if rule.cond and e.action == rule.cond[0]), None)
+                    found = (prev, cond)
+                    break
+            if found:
+                break
+        if not found:
+            break
+        causes.append(f"{say(cur)} — потому что {say(found[0])}" + (f", а {say(found[1])}" if found[1] else ""))
+        cur = found[0]
+    return ("; ".join(causes) + f". А началось всё с того, что {say(cur)}") if causes else "не вижу причины"
+
+
+def what_if_not(field: RuleField, story: list[Ev], agent: str, action: str) -> str:
+    removed = find(story, agent, action, field)
+    if not removed:
+        return "такого и не было"
+    derived = {e for i, e in enumerate(story[1:], 1)
+               if any(RuleField.fire(r, story[i - 1], story[:i - 1]) == e for r in field.rules)}
+    roots = [e for e in story if e not in derived and e != removed]
+    world = list(roots)
+    for r in roots:
+        for e, _ in consequences(field, r, world, blocked={removed}):
+            world.append(e)
+    lost = [say(e) for e in story if e not in world and e != removed]
+    return "ничего бы не изменилось" if not lost else f"тогда не было бы: {', '.join(lost)}"
+
+
+def moral(motive: tuple | None, definitions: dict[str, str]) -> str:
+    if not motive:
+        return "сначала нужно понять, зачем герой это сделал"
+    act, desire, chain = motive
+    holder = next((c.agent for _, c in chain if c and c.obj == desire.obj), "другой")
+    roles = {act.agent: "кто-то", holder: "другого", desire.obj: "то, что есть у другого"}
+    text = f"обобщаю: {roles[act.agent]} {act.action} {roles.get(act.obj, act.obj)}, чтобы получить {roles[desire.obj]}"
+    for word, meaning in definitions.items():
+        if act.action[:4] in meaning or ("похвал" in meaning and act.action.startswith("хвал")):
+            text += f". По определению это «{word}» ({meaning})"
+    return text + ". Значит: похвала может быть средством, а не правдой"
