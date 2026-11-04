@@ -112,9 +112,12 @@ class Organism:
             paragraphs.append(para)
         self.lang.grow_morphology()
         self.paragraphs += [(name, p) for p in paragraphs]
-        facts = self._digest(range(start, len(self.memory)))
         n_rules_before = len(self.rules.rules)
         self._heroes(paragraphs)
+        self.narr.learn(self, [self.memory[i][1] for i in range(start, len(self.memory))])
+        for p in paragraphs:                            # сначала — узнать рассказы: их фразы — события,
+            self._story(p)                              # а не общие сведения о героях
+        facts = self._digest(range(start, len(self.memory)))
         self.narr.learn(self, [self.memory[i][1] for i in range(start, len(self.memory))])
         for p in paragraphs:
             got = self._story(p)
@@ -146,10 +149,10 @@ class Organism:
                 return None                             # участник взялся ниоткуда — не пересказ
             mapping[role] = src
         if mapping.get("агент") == "агент" and mapping.get("объект", "объект") == "объект":
-            return self.lang.equate(A.forms[1], B.forms[1])   # «была такова — значит убежала»
+            return self.lang.equate(A.forms[1], B.forms[1]) or ""   # «была такова — значит убежала»
         item = (A.forms[1], B.forms[1], tuple(sorted(mapping.items())), source)
         if any(x[:3] == item[:3] for x in self.paraphrases):
-            return None
+            return ""                                   # уже знаю
         self.paraphrases.append(item)
         return (f"запомнила: «{a}» — значит «{b}»: при «{A.forms[1]}» кто и над кем меняются местами")
 
@@ -292,11 +295,14 @@ class Organism:
                 self.understood.add(i)
                 self.lessons.add(i)
                 continue
-            m = PARA.match(s.lower().replace("ё", "е")) if self._complex_ok else None
+            m = PARA.match(s.lower().replace("ё", "е"))
             if m and len(tokens(m.group(1))) >= 2 and len(tokens(m.group(2))) >= 2:
+                if not self._complex_ok:                # урок — на втором круге; но и не факт о мире
+                    continue
                 note = self._learn_paraphrase(m.group(1), m.group(2), source)
-                if note:                                # «Мяч пленил кошку — значит, кошка хочет мяч»
-                    self.journal.append(note)
+                if note is not None:                    # «Мяч пленил кошку — значит, кошка хочет мяч»
+                    if note:
+                        self.journal.append(note)
                     self.understood.add(i)
                     self.lessons.add(i)
                     continue
@@ -451,6 +457,7 @@ class Organism:
         self.compounds, self.some, self._prev = {}, {}, None
         self.paraphrases, self.lessons = [], set()
         self.lang.weak_next = {}                        # слабые подсказки — заново, с выросшим языком
+        self.lang.hints = {}                            # и сильные: «Жила-была белка» — не «жила-была — кто»
         self.know.name = self.name
         self.understood = set()
         # сначала простые фразы (по ним видно, какие слова — названия, а какие — действия),
@@ -549,10 +556,14 @@ class Organism:
         m = re.match(r"почему\s+(.+)$", t)
         if m:
             for agent, action in self._pairs(m.group(1).split()):
-                for src, st in reversed(self.stories):
+                for src, st in reversed(self.stories):     # о последнем рассказе, где это было
                     ans = why_happened(self.rules, st, agent, action)
-                    if not ans.startswith(("в этой истории", "не вижу")):
-                        return _cap(ans) + "."
+                    if ans.startswith("в этой истории"):
+                        continue
+                    if ans.startswith("не вижу"):
+                        return (f"В рассказе «{src}» не вижу, почему так случилось: того, что было перед этим, "
+                                f"я не понимаю (может быть, там незнакомые мне слова — я о них спрашиваю).")
+                    return _cap(ans) + f". (из рассказа «{src}»)"
             chain = self.causes.why(self.situation(m.group(1)), self._isa, self.name)
             if chain:
                 return "Потому что: " + "; а ".join(chain) + "."

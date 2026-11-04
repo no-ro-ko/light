@@ -214,6 +214,11 @@ class Narrator:
         self._marks = self._marked_tails(org)
         # согласная, на которой держится «кто действовал»: «-ла» (она) → «л»; её соседи — «-л», «-ло», «-ли»
         self._gcons = {t[0] for t in self._marks if len(t) == 2 and t[1] in VOWELS and t[0] not in VOWELS}
+        self._class_letters: dict[str, Counter] = defaultdict(Counter)
+        for key in self.noun_tails:
+            c = self._class_by_tails(key)
+            if c:
+                self._class_letters[case_key(org.name(key) or key)][c] += 1
         # окончания знакомых названий («рыбой», «птицей», «молоком») и знакомых действий («плавать»,
         # «летает» — из «рыба умеет плавать») — чтобы узнать незнакомое слово по форме
         self._noun_ends: dict[str, set] = defaultdict(set)
@@ -242,6 +247,9 @@ class Narrator:
             return True
         if w in self.adverbs:
             return False
+        if L in org.know.concepts and L in org.know.predicates and self.past_class(w) \
+                and L not in self.heroes and L not in self._place and L not in self._described:
+            return False                                     # «запела»: и «кто», и «что делает» — форма действия
         if L in org.know.concepts or L in self.heroes or L in self._place or L in self._described:
             return True                                      # видела на месте названия — это сильнее догадки
         if L in org.know.predicates:
@@ -252,8 +260,9 @@ class Narrator:
         """Признаки — по собственному опыту: слова, стоявшие перед названием («белые медведи»),
         их окончания, а потом и слова той же семьи форм («сильный, сильные» — как «белый, белые»)."""
         L = org.lang
-        mods = {L.lemma(m) for m in org.syntax.mods}
         nouns = {c for c in org.know.concepts if c not in org.know.predicates}
+        mods = {L.lemma(m) for m in org.syntax.mods if len(m) > 2 and not L.is_function(m)
+                and L.lemma(m) not in nouns and L.lemma(m) not in self._acts}
         for _ in range(2):                                 # окончание признака — у трёх разных слов
             by_end: dict[str, set] = defaultdict(set)
             for f in L.forms:
@@ -261,16 +270,19 @@ class Narrator:
                     by_end[f[-2:]].add(L.lemma(f))
             mods |= {L.lemma(f) for f in L.forms if len(f) > 3 and len(by_end.get(f[-2:], ())) >= 3
                      and L.lemma(f) not in nouns and L.lemma(f) not in self._acts}
-        forms = {f for f in L.forms if len(f) > 3 and L.lemma(f) in mods}
+        forms = {f for f in L.forms if len(f) > 3 and L.lemma(f) in mods and not L.is_function(f)}
         stems = {f[:-2] for f in forms if len(f) >= 6}
         forms |= {f for f in L.forms if len(f) >= 6 and f[:-2] in stems and L.lemma(f) not in nouns
-                  and L.lemma(f) not in self._acts}
-        ends = Counter(f[-2:] for f in forms)
+                  and L.lemma(f) not in self._acts and not L.is_function(f)}
+        by_end: dict[str, set] = defaultdict(set)          # окончание признака — у трёх разных слов
+        for f in forms:
+            by_end[f[-2:]].add(L.lemma(f))
+        ends = Counter({e: len(ls) for e, ls in by_end.items() if len(ls) >= 3})
         return mods | {L.lemma(f) for f in forms}, ends
 
     def is_attr(self, org, w: str) -> bool:
         mods, ends = self._attr or self._attributes(org)
-        return org.lang.lemma(w) in mods or (len(w) > 3 and ends[w[-2:]] >= 2)
+        return org.lang.lemma(w) in mods or (len(w) > 3 and ends[w[-2:]] >= 3)
 
     def verb_evidence(self, org, w: str) -> int:
         if org.lang.lemma(w) in self._acts:
@@ -397,29 +409,32 @@ class Narrator:
             ev = self._clause(org, self._classify(org, ws), Scene(), None, -1)
             if ev is None:
                 continue
-            act = ev.action if ev.action in self._acts else "сказано"     # обычная речь — для сравнения
-            self.speech[act] += speech_features(text)
-            if act != "сказано":
-                self.speech_form.setdefault(act, ev.forms[1])
+            feats = speech_features(text)
+            self.speech["*"] += feats                      # всё сказанное — фон для сравнения
+            if ev.action in self._acts:                    # рассказчик назвал, что это за речь
+                self.speech[ev.action] += feats
+                self.speech_form.setdefault(ev.action, ev.forms[1])
 
     def classify_speech(self, text) -> list[tuple[str, float]]:
-        """Что это за речь: по фразам — на какие примеры похоже больше всего (без примет — ничего)."""
-        acts = {a: ex for a, ex in self.speech.items() if ex}
-        if len(acts) < 2:
+        """Что это за речь: по фразам — чьи приметы в ней чаще, чем в сказанном вообще (фон).
+        Похвала — если её приметы («какая…», «ты», «крас-», «хорош-») здесь, как в похвалах."""
+        bg = self.speech.get("*", [])
+        acts = {a: ex for a, ex in self.speech.items() if ex and a != "*"}
+        if not acts or not bg:
             return []
         found = []
         for f in speech_features(text):
             best = None
             for a, ex in acts.items():
-                score = 0.0
+                score, shared = 0.0, 0
                 for feat in f:
                     n_a = sum(1 for e in ex if feat in e)
-                    n_o = sum(1 for b, exb in acts.items() if b != a for e in exb if feat in e)
-                    N_o = sum(len(exb) for b, exb in acts.items() if b != a)
-                    score += math.log((n_a + 0.5) / (len(ex) + 1)) - math.log((n_o + 0.5) / (N_o + 1))
-                if best is None or score > best[1]:
+                    n_b = sum(1 for e in bg if feat in e)
+                    shared += n_a > 0 and not feat.startswith("-")
+                    score += math.log((n_a + 0.5) / (len(ex) + 1)) - math.log((n_b + 0.5) / (len(bg) + 1))
+                if shared >= 2 and (best is None or score > best[1]):
                     best = (a, score)
-            if best and best[0] != "сказано" and best[1] > 1.5:
+            if best and best[1] > 1.0:
                 found.append(best)
         return found
 
@@ -524,7 +539,7 @@ class Narrator:
             elif org.lang.is_function(w) or w[0].isdigit():
                 c = "F"
             elif self.oblique(org, w) and nxt and nxt not in PREPS and not org.lang.is_function(nxt) \
-                    and self._attr and self._attr[1][w[-2:]] >= 2 and self.verb_evidence(org, nxt) < 2:
+                    and self._attr and self._attr[1][w[-2:]] >= 3 and self.verb_evidence(org, nxt) < 2:
                 c = "A"                                    # «сырный дух»: от «сыр», но окончание признака
             elif self.known_noun(org, w):
                 c = "N"
@@ -647,8 +662,8 @@ class Narrator:
                 return vcls is None or c is None or c == vcls
 
             sg = (first(before, plain, known, agrees)      # «Голодный кот давно хотел…»
+                  or first(after, nom, known, agrees)      # «Мимо бежала лиса», «Рядом сидел хитрый ёжик»
                   or first(before, nom, strong, agrees)    # «Лисица видит сыр» (как «птица»)
-                  or first(after, nom, known, agrees)      # «Мимо бежала лиса», «Рядом стоял мальчик»
                   or first(after, nom, strong, agrees))    # «На краю стола стоял кувшин»
             if sg is None and go_on():                     # «Позавтракать было совсем уж собралась»,
                 sg = "тот же"                              # «И говорит так сладко»: она же, лиса же
@@ -662,7 +677,9 @@ class Narrator:
                 pass
             elif sg is None:                               # «Стала хвалить ворону», «а сыр во рту держала» —
                 subj = inherited or scene.agent            # тот же герой; названное — над чем действуют
-                obj_group = after[0] if after else (before[0] if before else None)
+                if vcls and subj and self.noun_class(subj) not in (None, vcls):
+                    subj = next((e for e in reversed(scene.core) if self.noun_class(e) == vcls), subj)
+                obj_group = after[0] if after else (before[0] if before else None)                # «Барбос залаял»
             else:
                 subj_form = head(sg)
                 subj = self.refer(org, org.lang.lemma(subj_form), scene)
@@ -679,7 +696,10 @@ class Narrator:
             obj = self.resolve(obj_form, list(dict.fromkeys(pool)))
         elif obj_group is not None:
             form = core[obj_group[1]][0]
-            if self.patient_like(form) or self.known_noun(org, form):
+            weak = core[obj_group[1]][1] != "N"
+            if weak and form[-2:] in getattr(self, "_oblique_ends", set()):
+                pass                                       # «гуляла утром», «сидел рядом» — не «кого»
+            elif self.patient_like(form) or self.known_noun(org, form):
                 obj_form = form
                 obj = self.refer(org, org.lang.lemma(form), scene)
         if neg:
@@ -772,7 +792,7 @@ class Narrator:
         """«И говорит так сладко: «Голубушка, как хороша!… Спой, светик!»» → лиса хвалит ворону;
         лиса просит ворону. Если рассказчик сам назвал («стала хвалить: «…»») — уже есть."""
         last = story[-1] if story and story[-1].sent == i else None
-        if last is not None and last.action in self.speech:
+        if last is not None and last.action in self.speech and last.action != "*":
             return []
         speaker = last.agent if last is not None else scene.agent
         if speaker is None:
@@ -822,7 +842,16 @@ class Narrator:
         return None
 
     def noun_class(self, key: str) -> str | None:
-        """«Род» героя — по формам его действий: «сыр выпал» → «л», «лиса бежала» → «ла»."""
+        """«Род» героя — по формам его действий: «сыр выпал» → «л», «лиса бежала» → «ла»; если о нём
+        не видно — по последней букве имени, как у знакомых героев («пёс» — как «кот», «сыр»)."""
+        c = self._class_by_tails(key)
+        if c is None and getattr(self, "_names", None):
+            votes = self._class_letters.get(case_key(self._names(key) or key), Counter())
+            if sum(votes.values()) >= 3 and votes.most_common(1)[0][1] >= 0.8 * sum(votes.values()):
+                c = votes.most_common(1)[0][0]
+        return c
+
+    def _class_by_tails(self, key: str) -> str | None:
         votes = Counter()
         for forms in self.noun_tails.get(key, {}).values():
             for v in forms:
@@ -850,8 +879,11 @@ class Narrator:
         над кем действовали, тот потом действует (или наоборот). Описание рассказом не считается."""
         if len(events) < 3:
             return False
-        if sum(self.marked(e.forms[1]) for e in events) < 0.4 * len(events):
+        share = sum(self.marked(e.forms[1]) for e in events) / len(events)
+        if share < 0.4:
             return False
+        if share >= 0.5 and len({e.agent for e in events}) >= 2:
+            return True                                    # «ваза стояла… упала… мама прибежала»
         for n, e in enumerate(events):
             later = events[n + 1:]
             if e.obj and any(f.agent == e.obj for f in later):
