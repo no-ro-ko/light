@@ -68,8 +68,10 @@ def _entropy(c: np.ndarray) -> np.ndarray:
 
 class SegCortex:
     def __init__(self, min_unique: int = 2, alpha: float = 0.02, floor: float = 1e-5, max_depth: int = 40,
-                 cochange: bool = True, tol: float = 1.0, pooled: bool = True, consolidate: bool = False):
+                 cochange: bool = True, tol: float = 1.0, pooled: bool = True, consolidate: bool = False,
+                 half_life: float | None = None):
         self.min_unique, self.alpha, self.floor, self.max_depth = min_unique, alpha, floor, max_depth
+        self.half_life = half_life   # простое забывание: вес всего накопленного убывает вдвое за столько тактов
         self.cochange = cochange
         self.pooled, self.consolidate = pooled, consolidate
         self.tol = tol   # <1: из условий почти не хуже лучшего берём ближайшее к центру (бритва Оккама)
@@ -83,6 +85,8 @@ class SegCortex:
         self.chg = np.zeros(0, np.int32)
         self.leaf = np.zeros(0, np.int64)
         self.k = np.zeros(0, np.uint64)
+        self.last = np.zeros(0, np.int64)    # «часы опыта» последней встречи каждого окна
+        self.clock = 0                       # сколько тактов опыта прожито
         self._index: dict | None = None
         self.feat, self.val, self.yes, self.no, self.depth = [], [], [], [], []
         self.members: dict[int, np.ndarray] = {}
@@ -90,6 +94,7 @@ class SegCortex:
         self.stuck: set[int] = set()
         self._arr = None
         self._ver = 0
+        self._tab_ver = None   # кэш таблицы листьев недействителен после сброса
         self.rules: list = []
         self.info = {}
 
@@ -133,7 +138,11 @@ class SegCortex:
 
     def partial_fit(self, S0, A, PH, S1):
         t = time.time()
-        self._add(Samples.collect(S0, A, PH, S1))
+        n = len(S0)
+        if self.half_life and len(self.w):
+            self.w *= 0.5 ** (n / self.half_life)
+        self.clock += n
+        self._add(Samples.collect(S0, A, PH, S1), self.clock)
         self._grow()
         self._ver += 1
         if self.consolidate:
@@ -141,11 +150,12 @@ class SegCortex:
         self.info = {"fit_s": round(time.time() - t, 1), **self.stats()}
         return self
 
-    def _add(self, S: Samples):
+    def _add(self, S: Samples, t_end: int = 0):
         kk = keys(S.X) * np.uint64(K) + S.y.astype(np.uint64)
         n0 = len(self.y)
         if n0 == 0:
             self.X, self.y, self.w, self.chg, self.k = S.X.copy(), S.y.copy(), S.w.copy(), S.chg.copy(), kk
+            self.last = np.full(len(S.y), t_end, np.int64)
             new_rows = np.arange(len(S.y))
             changed_rows = np.zeros(0, np.int64)
         else:
@@ -155,6 +165,7 @@ class SegCortex:
             old = pos >= 0
             changed_rows = pos[old]
             np.add.at(self.w, changed_rows, S.w[old])
+            self.last[changed_rows] = t_end
             fresh = ~old
             new_rows = n0 + np.arange(int(fresh.sum()))
             self.X = np.concatenate([self.X, S.X[fresh]])
@@ -162,6 +173,7 @@ class SegCortex:
             self.w = np.concatenate([self.w, S.w[fresh]])
             self.chg = np.concatenate([self.chg, S.chg[fresh]])
             self.k = np.concatenate([self.k, kk[fresh]])
+            self.last = np.concatenate([self.last, np.full(int(fresh.sum()), t_end, np.int64)])
         if self._index is not None:
             for i in new_rows:
                 self._index[int(self.k[i])] = int(i)
@@ -252,23 +264,15 @@ class SegCortex:
     def _leaf_logp(self) -> np.ndarray:
         """Таблица log-вероятностей для каждого листа (узлы × сорт)."""
         n = len(self.feat)
-        cnt = np.zeros((n, K))
-        feat = self._arrays()[0]
-        isleaf = feat < 0
-        lf = self.leaf
-        np.add.at(cnt, (lf, self.y.astype(np.int64)), self.w)
-        tab = np.zeros((n, K))
+        ok = self.leaf >= 0
+        cnt = np.bincount(self.leaf[ok] * K + self.y[ok].astype(np.int64), weights=self.w[ok],
+                          minlength=n * K).reshape(n, K)
         C = cnt.sum(1, keepdims=True)
         p = (cnt + self.alpha) / (C + K * self.alpha)
-        tab[:] = p
-        tab = np.log(np.maximum(p, self.floor))
-        return tab
+        return np.log(np.maximum(p, self.floor))
 
-    def logp(self, g0, a, ph):
-        n, h, w = g0.shape
-        X = patches(g0, a, ph).reshape(-1, NF)
-        uk, first, inv = np.unique(keys(X), return_index=True, return_inverse=True)
-        U = X[first]
+    def _window_logp(self, U: np.ndarray):
+        """Для уникальных окон: номер листа (−1, если такого сорта центра ещё не было) и log-вероятности."""
         if getattr(self, "_tab_ver", None) != self._ver:
             self._tab = self._leaf_logp()
             self._tab_ver = self._ver
@@ -281,9 +285,46 @@ class SegCortex:
             lp = np.full((len(c), K), np.log(0.1 / (K - 1)), np.float32)
             lp[np.arange(len(c)), c] = np.log(0.9)
             out[~known] = lp
+        return node, out
+
+    def logp(self, g0, a, ph):
+        n, h, w = g0.shape
+        X = patches(g0, a, ph).reshape(-1, NF)
+        uk, first, inv = np.unique(keys(X), return_index=True, return_inverse=True)
+        U = X[first]
+        _, out = self._window_logp(U)
         if self.rules:
             self._apply_rules(U, out)
         return out[inv].reshape(n, h, w, K)
+
+    # ------------------------------------------------------------------ сон: перестройка и отставка
+    def rebuild(self):
+        """Вырастить дерево заново по всему накопленному (качество как при разовом обучении)."""
+        t = time.time()
+        self.feat, self.val, self.yes, self.no, self.depth = [], [], [], [], []
+        self.members = {}
+        self.root = np.full(K, -1, np.int64)
+        self.stuck = set()
+        self._arr = None
+        self.rules = []
+        self.leaf = np.full(len(self.y), -1, np.int64)
+        for c in np.unique(self.X[:, CENTER]):
+            r = self._new_node(0)
+            self.root[c] = r
+            rows = np.nonzero(self.X[:, CENTER] == c)[0]
+            self.members[r] = rows
+            self.leaf[rows] = r
+        self._dirty = set(self.members)
+        self._grow()
+        self._ver += 1
+        self.info["rebuild_s"] = round(time.time() - t, 1)
+        self.info.update(self.stats())
+        return self
+
+    def retire_rows(self, mask: np.ndarray, factor: float):
+        """Отставка: вес выбранных строк хранилища (устаревших свидетельств) умножается на factor."""
+        self.w[mask] *= factor
+        self._ver += 1
 
     def _apply_rules(self, U: np.ndarray, out: np.ndarray):
         """Общие правила (после сна) перекрывают дерево там, где подходят."""

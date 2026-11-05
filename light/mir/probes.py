@@ -340,17 +340,24 @@ def surprise(lp: np.ndarray, g1: np.ndarray) -> np.ndarray:
 
 def evaluate(model, pr: Probes, chunk: int = 128) -> dict:
     ok = np.zeros(len(pr))
+    conf_sum, conf_n = 0.0, 0
     for i in range(0, len(pr), chunk):
         sl = slice(i, i + chunk)
         lp = model.logp(pr.G0[sl], pr.A[sl], pr.PH[sl])
         st, si = surprise(lp, pr.G1T[sl]), surprise(lp, pr.G1I[sl])
         diff = si - st
         ok[sl] = np.where(np.abs(diff) < 1e-6, 0.5, (diff > 0).astype(float))
+        # уверенность в настоящих изменениях: вероятность, данная настоящему исходу там, где клетка действительно изменилась
+        take = np.take_along_axis(lp, pr.G1T[sl][..., None].astype(np.intp), axis=-1)[..., 0]
+        changed = pr.G1T[sl] != pr.G0[sl]
+        conf_sum += float(np.exp(take)[changed].sum())
+        conf_n += int(changed.sum())
     fam = {}
     for fi, name in enumerate(FAM_NAMES):
         m = pr.fam == fi
         fam[name] = float(ok[m].mean())
     return {"macro": float(np.mean(list(fam.values()))), "micro": float(ok.mean()), "families": fam,
+            "conf": conf_sum / max(conf_n, 1),
             "by_level": [float(ok[pr.level == l].mean()) for l in range(3)],
             "by_mode": {f"{FAM_NAMES[fi]}/{FAMILIES[FAM_NAMES[fi]][1][mi]}":
                         float(ok[(pr.fam == fi) & (pr.mode == mi)].mean())

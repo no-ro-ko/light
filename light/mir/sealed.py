@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import probes
@@ -45,8 +46,12 @@ def _head() -> str:
         return "?"
 
 
-def evaluate_sealed(model, tag: str, seed: int = SEALED_SEED, log: bool = True) -> dict:
-    res = probes.evaluate(model, sealed(seed))
+def evaluate_sealed(model, tag: str, seed: int = SEALED_SEED, log: bool = True, flip: bool = False) -> dict:
+    """flip=True: те же кадры, но метроном читается наоборот («мир B» в опытах со сменой закона)."""
+    pr = sealed(seed)
+    if flip:
+        pr = replace(pr, PH=1 - pr.PH)
+    res = probes.evaluate(model, pr)
     if log and seed == SEALED_SEED:
         LOG.parent.mkdir(exist_ok=True)
         with open(LOG, "a", encoding="utf-8") as f:

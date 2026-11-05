@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from light.mir import curious, life, patches, probes, world as W  # noqa: E402
 from light.mir.mlp import PatchMLP  # noqa: E402
+from light.mir.diary import Diary  # noqa: E402
 from light.mir.seg import SegCortex  # noqa: E402
 
 
@@ -196,6 +197,75 @@ class TestLearners(unittest.TestCase):
         self.assertEqual(len(res), 1)
         self.assertIn("dev", res[0])
         self.assertEqual(set(res[0]["second_witness_at"]), set(W.RULE_NAMES.values()))
+
+
+class TestDiary(unittest.TestCase):
+    DIR = ["осыпание песка", "растекание воды"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.S0, cls.A, cls.PH, cls.S1 = life.wander(4000, seed=7, cache=False)
+        cls.pr = probes.build(seed=99, per_mode=8)
+        cls.prB = probes.Probes(**{**cls.pr.__dict__, "PH": 1 - cls.pr.PH})
+
+    def _direction(self, m, pr):
+        r = probes.evaluate(m, pr)
+        return sum(r["families"][f] for f in self.DIR) / 2
+
+    def test_cortex_forgetting_clock_and_rebuild(self):
+        S0, A, PH, S1 = (x[:600] for x in (self.S0, self.A, self.PH, self.S1))
+        m = SegCortex(tol=0.8, half_life=300)
+        m.partial_fit(S0[:300], A[:300], PH[:300], S1[:300])
+        w0 = m.w.sum()
+        m.partial_fit(S0[300:600], A[300:600], PH[300:600], S1[300:600])
+        self.assertEqual(m.clock, 600)
+        self.assertEqual(int(m.last.max()), 600)
+        base = SegCortex(tol=0.8).fit(S0, A, PH, S1)
+        before = probes.evaluate(base, self.pr)["macro"]
+        base.rebuild()
+        self.assertAlmostEqual(before, probes.evaluate(base, self.pr)["macro"], delta=0.04)
+        self.assertGreater(w0, 0)
+
+    def test_diary_does_not_disturb_a_stable_world(self):
+        n = 1500
+        S0, A, PH, S1 = (x[:n] for x in (self.S0, self.A, self.PH, self.S1))
+        plain = SegCortex(tol=0.8)
+        plain.fit(S0[:n - 600], A[:n - 600], PH[:n - 600], S1[:n - 600])
+        d = Diary(SegCortex(tol=0.8)).fit(S0, A, PH, S1, warm=600, chunk=200)
+        for i in range(n - 600, n, 200):
+            plain.partial_fit(S0[i:i + 200], A[i:i + 200], PH[i:i + 200], S1[i:i + 200])
+        plain.rebuild()
+        d.sleep()
+        a, b = probes.evaluate(plain, self.pr)["macro"], probes.evaluate(d, self.pr)["macro"]
+        self.assertAlmostEqual(a, b, delta=0.03)
+        self.assertLessEqual(d.stats()["active_leaves"], 3)
+
+    def test_diary_switches_after_a_law_change(self):
+        n_a = 2500
+        S0, A, PH, S1 = self.S0, self.A, self.PH, self.S1
+        plain = SegCortex(tol=0.8).fit(S0[:n_a - 600], A[:n_a - 600], PH[:n_a - 600], S1[:n_a - 600])
+        d = Diary(SegCortex(tol=0.8)).fit(S0[:n_a], A[:n_a], PH[:n_a], S1[:n_a], warm=600, chunk=200)
+        for i in range(n_a - 600, n_a, 200):
+            plain.partial_fit(S0[i:i + 200], A[i:i + 200], PH[i:i + 200], S1[i:i + 200])
+        for i in range(n_a, n_a + 1200, 100):          # мир B: метроном наоборот
+            ch = (S0[i:i + 100], A[i:i + 100], 1 - PH[i:i + 100], S1[i:i + 100])
+            plain.partial_fit(*ch)
+            d.partial_fit(*ch)
+        plain.rebuild()
+        d.sleep()
+        self.assertGreater(self._direction(d, self.prB), self._direction(plain, self.prB) + 0.10)
+        self.assertGreater(d.stats()["active_leaves"], 0)
+
+    def test_consolidation_retires_stale_evidence(self):
+        n_a = 2500
+        S0, A, PH, S1 = self.S0, self.A, self.PH, self.S1
+        d = Diary(SegCortex(tol=0.8), consolidate=True).fit(S0[:n_a], A[:n_a], PH[:n_a], S1[:n_a], warm=600, chunk=200)
+        w_before = d.cortex.w.sum()
+        for i in range(n_a, n_a + 1200, 100):
+            d.partial_fit(S0[i:i + 100], A[i:i + 100], 1 - PH[i:i + 100], S1[i:i + 100])
+        d.sleep()
+        self.assertGreater(d.info.get("retired_rows", 0), 0)
+        self.assertGreater(w_before, 0)
 
 
 if __name__ == "__main__":
