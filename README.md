@@ -200,6 +200,7 @@ flowchart LR
 - **Обычная сеть** с теми же входами: около 90% на 10 000 тактах; редкие законы (таяние льда, мокрое дерево) знает плохо даже на 30 000. Для одной и той же точности коре нужно примерно втрое меньше опыта. Но по заранее записанному порогу «90%» их цена опыта совпала, поэтому гипотеза «втрое меньше» формально **не** подтвердилась.
 - **Сон** (обобщение правил) пользы не дал. **Любопытство** вида «иди туда, где не уверена» не помогло; «тянусь к предметам, которыми мало занималась» дало небольшой выигрыш (в среднем +3…+5 п.п. на малых и средних бюджетах).
 - **Граница:** когда закон мира меняется, кора переучивается очень медленно.
+- **Дневник поверх коры** (быстрая кора недавнего опыта и «арбитр» между ней и медленной корой): при смене закона учится быстрее одной коры (через 3 000 тактов направление осыпания и течения верно в 73% пар против 43%), в спокойном мире ничего не портит и лучше простого забывания, которое быстро, но роняет уверенность. Заранее записанный порог скорости при этом **не выполнен** (53% вместо 55% на 1 000 тактах) — подробности в [docs/MIR.md](docs/MIR.md), разд. 13–14.
 
 ```bash
 python3 -m unittest tests.test_mir                # законы мира, прибор, обучение (около 10 секунд)
@@ -251,7 +252,7 @@ python3 examples/demo.py
 python3 -m unittest discover tests
 ```
 
-106 тестов, около двух минут (17 из них — про песочницу «Мир»). Слепая проверка на новых рассказах — в `tests/test_unseen.py`. Правило честной проверки: рассказы и эталон пишутся до первого запуска и потом не подгоняются. Если по рассказу исправляли разбор, он уже не слепой, и для новой проверки нужны новые рассказы.
+110 тестов, около двух с половиной минут (21 из них — про песочницу «Мир»). Слепая проверка на новых рассказах — в `tests/test_unseen.py`. Правило честной проверки: рассказы и эталон пишутся до первого запуска и потом не подгоняются. Если по рассказу исправляли разбор, он уже не слепой, и для новой проверки нужны новые рассказы.
 
 ### Честные границы
 
@@ -478,6 +479,7 @@ Results (sealed set, three independent streams of experience; details in [docs/M
 - A **standard network** with the same inputs reaches about 90% at 10,000 steps and knows rare laws (melting, wet wood) poorly even at 30,000. For the same accuracy the cortex needs roughly three times less experience. But by the pre-registered 90% threshold their cost of experience coincided, so the "three times less" hypothesis was formally **not** confirmed.
 - **Sleep** (generalising the rules) did not help. **Curiosity** of the kind "go where you are unsure" did not help either; "drawn to objects it has handled little" gave a small gain (+3…+5 points on average at small and medium budgets).
 - **Limit:** when a law of the world changes, the cortex relearns very slowly.
+- A **diary on top of the cortex** (a fast cortex of recent experience and an "arbiter" between it and the slow cortex): after a law change it learns faster than the cortex alone (73% vs 43% of pairs on the sand/water direction after 3,000 steps), harms nothing in a calm world, and beats simple forgetting, which is fast but loses confidence. The pre-registered speed threshold was **not** met (53% instead of 55% at 1,000 steps); details in [docs/MIR.md](docs/MIR.md), sections 13–14 (in Russian).
 
 ```bash
 python3 -m unittest tests.test_mir                # world laws, the instrument, learning (about 10 seconds)
@@ -529,7 +531,7 @@ python3 examples/demo.py
 python3 -m unittest discover tests
 ```
 
-106 tests, about two minutes (17 of them cover the "Mir" sandbox). The blind test on new stories is `tests/test_unseen.py`. The rule for an honest test: the stories and the expected answers are written before the first run and never tuned afterwards. Once a story has been used to fix the parser, it is no longer blind; a new test needs new stories.
+110 tests, about two and a half minutes (21 of them cover the "Mir" sandbox). The blind test on new stories is `tests/test_unseen.py`. The rule for an honest test: the stories and the expected answers are written before the first run and never tuned afterwards. Once a story has been used to fix the parser, it is no longer blind; a new test needs new stories.
 
 ### Honest limits
 
