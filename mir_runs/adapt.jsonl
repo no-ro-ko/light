@@ -1,0 +1,15 @@
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 11, "t_a": 10000, "b_steps": 0, "A": 0.9766, "B": 0.8711, "B_direction": 0.125, "A_direction": 0.975}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 11, "t_a": 10000, "b_steps": 100, "A": 0.9773, "B": 0.882, "B_direction": 0.2, "A_direction": 0.975}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 11, "t_a": 10000, "b_steps": 300, "A": 0.9773, "B": 0.875, "B_direction": 0.1375, "A_direction": 0.975}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 11, "t_a": 10000, "b_steps": 1000, "A": 0.9742, "B": 0.8828, "B_direction": 0.225, "A_direction": 0.95}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 11, "t_a": 10000, "b_steps": 3000, "A": 0.9727, "B": 0.8945, "B_direction": 0.325, "A_direction": 0.9}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 12, "t_a": 10000, "b_steps": 0, "A": 0.95, "B": 0.8375, "B_direction": 0.075, "A_direction": 0.9875}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 12, "t_a": 10000, "b_steps": 100, "A": 0.95, "B": 0.8375, "B_direction": 0.075, "A_direction": 0.9875}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 12, "t_a": 10000, "b_steps": 300, "A": 0.9438, "B": 0.843, "B_direction": 0.1375, "A_direction": 0.9625}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 12, "t_a": 10000, "b_steps": 1000, "A": 0.9469, "B": 0.8453, "B_direction": 0.1562, "A_direction": 0.9875}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 12, "t_a": 10000, "b_steps": 3000, "A": 0.9453, "B": 0.8711, "B_direction": 0.3, "A_direction": 0.9125}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 13, "t_a": 10000, "b_steps": 0, "A": 0.968, "B": 0.8703, "B_direction": 0.1125, "A_direction": 0.9}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 13, "t_a": 10000, "b_steps": 100, "A": 0.9688, "B": 0.868, "B_direction": 0.1, "A_direction": 0.9125}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 13, "t_a": 10000, "b_steps": 300, "A": 0.9656, "B": 0.8742, "B_direction": 0.1375, "A_direction": 0.9}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 13, "t_a": 10000, "b_steps": 1000, "A": 0.9719, "B": 0.8844, "B_direction": 0.2, "A_direction": 0.9125}
+{"kind": "seg", "cfg": {"tol": 0.8}, "stream": 13, "t_a": 10000, "b_steps": 3000, "A": 0.9453, "B": 0.9062, "B_direction": 0.3812, "A_direction": 0.6937}
