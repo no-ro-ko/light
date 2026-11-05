@@ -36,6 +36,27 @@ def steps_between(a, b, grid=GRID):
     return ib - ia
 
 
+def tuned(args):
+    """Для каждой ширины — настройка с наибольшим средним черновым итогом на бюджетах 1000 и 10000."""
+    rows = [r for r in load("tune_mlp") if r["cfg"].get("pooled")]
+    agg = defaultdict(list)
+    for r in rows:
+        if r["T"] in (1000, 10000):
+            c = r["cfg"]
+            agg[(c["width"], c["weighting"], c["lr"])].append(r["dev"]["macro"])
+    best = {}
+    for (w, wt, lr), v in agg.items():
+        if len(v) < 2 and w != 256:
+            continue                      # настройка должна быть измерена на обоих бюджетах (ширина 256 — только на 10000)
+        m = sum(v) / len(v)
+        if w not in best or m > best[w][0]:
+            best[w] = (m, wt, lr)
+    for w in sorted(best):
+        m, wt, lr = best[w]
+        print(json.dumps({"width": w, "weighting": wt, "lr": lr, "steps": 8000, "pooled": True}, sort_keys=True),
+              f"  # среднее черновое {m*100:.1f}% по {len(agg[(w, wt, lr)])} бюдж.")
+
+
 def curves(args):
     rows = load(args.file)
     key = args.key
@@ -55,8 +76,17 @@ def curves(args):
     for n, m in sorted(meds.items()):
         cells = "".join(f"{m[T]*100:8.1f}" if T in m else f"{'—':>8s}" for T in GRID)
         print(f"{n[:58]:58s}{cells}   {t90(m) or '> ' + str(max(m))}   ({len(groups[n][max(m)])})")
-    cort = {n: m for n, m in meds.items() if n.startswith("seg")}
+    cort = {n: m for n, m in meds.items() if n.startswith("seg") and "consolidate" not in n}
+    sleepy = {n: m for n, m in meds.items() if n.startswith("seg") and "consolidate" in n}
     mlps = {n: m for n, m in meds.items() if n.startswith("mlp")}
+    if cort and sleepy:
+        b, d = next(iter(cort.values())), next(iter(sleepy.values()))
+        gains = [(T, (d[T] - b[T]) * 100) for T in GRID if T in b and T in d]
+        good = sum(1 for T, g in gains if T in (3000, 10000, 30000) and g >= 2)
+        bad = [T for T, g in gains if g < -2]
+        print("\nH5 (сон): разность D − B, п.п.: " + ", ".join(f"{T}: {g:+.1f}" for T, g in gains))
+        print(f"H5: выше на ≥2 п.п. на {good} из бюджетов {{3000, 10000, 30000}}; ниже на >2 п.п. на бюджетах {bad or 'нет'} → "
+              f"{'СОН ПОМОГ' if good >= 2 and not bad else 'СОН НЕ ПОКАЗАЛ ПОЛЬЗЫ'}")
     if not cort or not mlps:
         return
     bc = min(cort, key=lambda n: (t90(cort[n]) or 10 ** 9, -max(cort[n].values())))
@@ -86,58 +116,73 @@ def curves(args):
 
 
 def live(args):
-    rows = load(args.file)
+    rows = []
+    for f in args.file.split(","):
+        rows += load(f)
     key = args.key
     by = defaultdict(lambda: defaultdict(list))
     sec = defaultdict(lambda: defaultdict(list))
+    seeds = defaultdict(set)
     for r in rows:
         if key not in r:
             continue
         by[r["policy"]][r["T"]].append(r[key]["macro"])
+        seeds[r["policy"]].add(r["seed"])
         for law, t in r["second_witness_at"].items():
             sec[r["policy"]][law].append(t)
     Ts = sorted({T for p in by.values() for T in p})
-    print(f"Блуждание против любопытства ({key}-набор), медиана по потокам")
+    print(f"Политики ({key}-набор), медиана по потокам; потоков: " + ", ".join(f"{p} — {len(v)}" for p, v in seeds.items()))
     print(f"{'политика':12s}" + "".join(f"{T:>8d}" for T in Ts))
     med = {}
     for pol, g in by.items():
         med[pol] = {T: median(v) for T, v in g.items()}
         print(f"{pol:12s}" + "".join(f"{med[pol][T]*100:8.1f}" if T in med[pol] else f"{'—':>8s}" for T in Ts))
-    if "random" in med and "curious" in med:
+    if "random" not in med:
+        return
+    for pol in [p for p in med if p not in ("random", "curious0")]:
+        print(f"\n=== {pol} против блуждания ===")
+        print("разность, п.п.: " + ", ".join(f"{T}: {(med[pol][T] - med['random'][T]) * 100:+.1f}" for T in Ts))
         win = lose = 0
         for T in (300, 1000, 3000, 10000):
-            if T in med["random"] and T in med["curious"]:
-                d = (med["curious"][T] - med["random"][T]) * 100
+            if T in med["random"] and T in med[pol]:
+                d = (med[pol][T] - med["random"][T]) * 100
                 win += d >= 3
                 lose += d <= -3
-        print(f"H3: бюджетов из {{300,1000,3000,10000}}, где любопытство выше на ≥3 п.п.: {win}; ниже на ≥3: {lose} → "
+        print(f"H3: бюджетов из {{300,1000,3000,10000}}, где выше на ≥3 п.п.: {win}; ниже на ≥3: {lose} → "
               f"{'ВЫПОЛНЕНА' if win >= 3 and lose == 0 else 'НЕ ВЫПОЛНЕНА'} (нужно ≥3 и 0)")
         faster, ratios = 0, []
-        print("\nКогда впервые встретилось ВТОРОЕ свидетельство закона (такт; медиана по потокам):")
         for law in sec["random"]:
-            r = [x for x in sec["random"][law]]
-            c = [x for x in sec["curious"][law]]
-            mr = median(x if x is not None else 10 ** 6 for x in r)
-            mc = median(x if x is not None else 10 ** 6 for x in c)
-            faster += mc < mr
-            if mc < 10 ** 6 and mr < 10 ** 6:
-                ratios.append(mr / max(mc, 1))
-            print(f"  {law:16s} блуждание {mr if mr < 10**6 else '—':>7}   любопытство {mc if mc < 10**6 else '—':>7}")
+            mr = median(x if x is not None else 10 ** 6 for x in sec["random"][law])
+            mc = median(x if x is not None else 10 ** 6 for x in sec[pol][law])
+            if mc < mr:
+                faster += 1
+                if mr < 10 ** 6:
+                    ratios.append(mr / max(mc, 1))
         mratio = median(ratios) if ratios else 0
-        print(f"H4: законов, где любопытство быстрее: {faster} из {len(sec['random'])}; медианное ускорение ×{mratio:.2f} → "
+        print(f"H4: законов, где второе свидетельство раньше: {faster} из {len(sec['random'])}; "
+              f"медианное ускорение среди них ×{mratio:.2f} → "
               f"{'ВЫПОЛНЕНА' if faster >= 6 and mratio >= 1.5 else 'НЕ ВЫПОЛНЕНА'} (нужно ≥6 законов и ≥×1,5)")
+        if args.verbose:
+            print(f"  {'закон':16s} {'блуждание':>10s} {pol:>10s}")
+            for law in sec["random"]:
+                a = median(x if x is not None else 10 ** 6 for x in sec["random"][law])
+                b = median(x if x is not None else 10 ** 6 for x in sec[pol][law])
+                print(f"  {law:16s} {'—' if a >= 10**6 else int(a):>10} {'—' if b >= 10**6 else int(b):>10}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    t = sub.add_parser("tuned")
+    t.set_defaults(fn=tuned)
     c = sub.add_parser("curves")
     c.add_argument("--file", default="final_curves")
     c.add_argument("--key", default="sealed")
     c.set_defaults(fn=curves)
     l = sub.add_parser("live")
-    l.add_argument("--file", default="final_live")
+    l.add_argument("--file", default="final_live", help="файлы через запятую")
     l.add_argument("--key", default="sealed")
+    l.add_argument("--verbose", action="store_true")
     l.set_defaults(fn=live)
     a = ap.parse_args()
     a.fn(a)

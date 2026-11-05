@@ -66,10 +66,26 @@ def tune_mlp(args):
                   f"val {rec['info'].get('val', 0):.4f}  шагов {rec['info'].get('steps')}  {rec['fit_s']} с", flush=True)
 
 
+def done_before(name: str, kind: str, cfg: dict, T: int, stream: int, mode: str) -> bool:
+    """Уже есть запись для этой тройки (модель, бюджет, поток)? Повторно к запечатанному не обращаемся."""
+    p = OUT / f"{name}.jsonl"
+    if not p.exists():
+        return False
+    want = "sealed" if ("sealed" in mode or mode == "both") else "dev"
+    for line in open(p, encoding="utf-8"):
+        r = json.loads(line)
+        if r["kind"] == kind and r["cfg"] == cfg and r["T"] == T and r["stream"] == stream and want in r:
+            return True
+    return False
+
+
 def curve(args):
     cfg = json.loads(args.cfg)
     for stream in args.seeds:
         for T in args.budgets:
+            if done_before(args.out or f"curve_{args.kind}", args.kind, cfg, T, stream, args.probes):
+                print(f"пропуск (уже есть): {args.kind} T={T} поток {stream}", flush=True)
+                continue
             rec = run_one(args.kind, cfg, T, stream, args.probes, args.tag)
             append(args.out or f"curve_{args.kind}", rec)
             key = "sealed" if "sealed" in rec else "dev"

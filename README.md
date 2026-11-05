@@ -188,6 +188,24 @@ flowchart LR
 
 Врождённого немного, и оно перечислено честно: «не», «это», «—», «ли», 57 служебных слов (предлоги, союзы, местоимения), притяжательные («свой», «мой»…), «хочет» как желание, «X — значит Y». Всё остальное — из прочитанного.
 
+### Новое: песочница «Мир» — учёба на собственном опыте
+
+Всё выше учится по текстам, то есть по чужим описаниям мира. В `light/mir/` — первый шаг по другому пути: маленький мир из клеток (песок, вода, камень, дерево, огонь, лёд и «я», который ходит, копает, поджигает, толкает), где существо учится предсказывать последствия **собственным опытом**, а не по словам.
+
+Главное здесь — **прибор**: проверки «удивлением», как у младенцев. Модели показывают пары «возможное / невозможное» событие в небывалых окружениях, и по тому, чему она удивляется сильнее, видно, что она выучила. Прибор сам проверен эталонами («знает все законы» — 100%, «ничего не меняется» — 28%), а запечатанный набор открывался только после того, как условия успеха были записаны и закоммичены (журнал обращений — `mir_runs/sealed_log.jsonl`).
+
+Что получилось (запечатанный набор, три независимых потока опыта, подробнее в [docs/MIR.md](docs/MIR.md)):
+
+- **Растущая кора** из сегментов-условий (без обратного распространения) выучила законы мира почти полностью: 98% на 10 000 тактах опыта. Выученное читается словами: «лёд тает, если рядом огонь», «сухое дерево загорается, если рядом огонь».
+- **Обычная сеть** с теми же входами: около 90% на 10 000 тактах; редкие законы (таяние льда, мокрое дерево) знает плохо даже на 30 000. Для одной и той же точности коре нужно примерно втрое меньше опыта. Но по заранее записанному порогу «90%» их цена опыта совпала, поэтому гипотеза «втрое меньше» формально **не** подтвердилась.
+- **Сон** (обобщение правил) пользы не дал. **Любопытство** вида «иди туда, где не уверена» не помогло; «тянусь к предметам, которыми мало занималась» дало небольшой выигрыш (в среднем +3…+5 п.п. на малых и средних бюджетах).
+- **Граница:** когда закон мира меняется, кора переучивается очень медленно.
+
+```bash
+python3 -m unittest tests.test_mir                # законы мира, прибор, обучение (около 10 секунд)
+python3 -m light.mir.report curves --key sealed   # кривые «опыт → итог» из сохранённых запусков
+```
+
 ### Другие части репозитория
 
 «Росток» — последняя и главная часть. До него построены и описаны отдельные модули:
@@ -201,6 +219,7 @@ flowchart LR
 | `light/lab/` | учёный: сам ставит опыты и находит законы | [RESULTS.md §2](docs/RESULTS.md) |
 | `light/sema/` | СЕМА — нейросеть смыслов | [SEMA.md](docs/SEMA.md) |
 | `light/rost/fabric.py` | «Росток» на образах: рождается пустым, растёт, во сне перестраивает себя | [ROSTOK.md](docs/ROSTOK.md) |
+| `light/mir/` | песочница из клеток, проверки «удивлением», растущая кора и обычная сеть для сравнения | [MIR.md](docs/MIR.md) |
 
 Разговор с «детским» разумом (своя память — файл `light_state.pkl`):
 
@@ -232,7 +251,7 @@ python3 examples/demo.py
 python3 -m unittest discover tests
 ```
 
-89 тестов, около трёх минут. Слепая проверка на новых рассказах — в `tests/test_unseen.py`. Правило честной проверки: рассказы и эталон пишутся до первого запуска и потом не подгоняются. Если по рассказу исправляли разбор, он уже не слепой, и для новой проверки нужны новые рассказы.
+106 тестов, около двух минут (17 из них — про песочницу «Мир»). Слепая проверка на новых рассказах — в `tests/test_unseen.py`. Правило честной проверки: рассказы и эталон пишутся до первого запуска и потом не подгоняются. Если по рассказу исправляли разбор, он уже не слепой, и для новой проверки нужны новые рассказы.
 
 ### Честные границы
 
@@ -253,6 +272,7 @@ python3 -m unittest discover tests
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | «мозг»: сцена внимания и отделы |
 | [docs/CORTEX.md](docs/CORTEX.md) | корковая сеть |
 | [docs/SEMA.md](docs/SEMA.md) | нейросеть смыслов |
+| [docs/MIR.md](docs/MIR.md) | песочница «Мир»: проверки «удивлением», кора против обычной сети, результаты |
 
 ### Лицензия
 
@@ -446,6 +466,24 @@ The code lives in `light/rost/`:
 
 Very little is innate, and it is listed honestly: «не» (*not*), «это» and «—» (*is*), «ли» (*question*), 57 function words (prepositions, conjunctions, pronouns), possessives («свой», «мой» — *one's own*, *my*), «хочет» (*wants*) as desire, «X — значит Y» (*X means Y*). Everything else comes from what it reads.
 
+### New: the "Mir" sandbox — learning from its own experience
+
+Everything above learns from texts, that is, from other people's descriptions of the world. `light/mir/` is a first step down a different road: a small world of cells (sand, water, stone, wood, fire, ice and "me", who walks, digs, ignites and pushes) in which the creature learns to predict consequences from **its own experience**, not from words.
+
+The main thing here is the **instrument**: "surprise" tests, like those used with infants. A model is shown pairs of a possible and an impossible event in unfamiliar surroundings, and what surprises it more shows what it has learned. The instrument was itself validated with reference models ("knows every law" 100%, "nothing changes" 28%), and the sealed test set was opened only after the success criteria had been written down and committed (the access log is `mir_runs/sealed_log.jsonl`).
+
+Results (sealed set, three independent streams of experience; details in [docs/MIR.md](docs/MIR.md), in Russian):
+
+- A **growing cortex** of condition segments (no backpropagation) learned almost all the laws of the world: 98% at 10,000 steps of experience. What it learned can be read in words: "ice melts if there is fire next to it", "dry wood ignites if there is fire next to it".
+- A **standard network** with the same inputs reaches about 90% at 10,000 steps and knows rare laws (melting, wet wood) poorly even at 30,000. For the same accuracy the cortex needs roughly three times less experience. But by the pre-registered 90% threshold their cost of experience coincided, so the "three times less" hypothesis was formally **not** confirmed.
+- **Sleep** (generalising the rules) did not help. **Curiosity** of the kind "go where you are unsure" did not help either; "drawn to objects it has handled little" gave a small gain (+3…+5 points on average at small and medium budgets).
+- **Limit:** when a law of the world changes, the cortex relearns very slowly.
+
+```bash
+python3 -m unittest tests.test_mir                # world laws, the instrument, learning (about 10 seconds)
+python3 -m light.mir.report curves --key sealed   # "experience → score" curves from the saved runs
+```
+
 ### Other parts of the repository
 
 Rostok is the latest and main part. Before it, separate modules were built and documented (documents in Russian):
@@ -459,6 +497,7 @@ Rostok is the latest and main part. Before it, separate modules were built and d
 | `light/lab/` | a scientist: sets up experiments and finds laws by itself | [RESULTS.md §2](docs/RESULTS.md) |
 | `light/sema/` | SEMA — a neural network of meanings | [SEMA.md](docs/SEMA.md) |
 | `light/rost/fabric.py` | Rostok on images: born empty, grows, rebuilds itself in sleep | [ROSTOK.md](docs/ROSTOK.md) |
+| `light/mir/` | a cell sandbox, "surprise" tests, a growing cortex and a standard network for comparison | [MIR.md](docs/MIR.md) |
 
 A chat with the "child" mind (it keeps its own memory in `light_state.pkl`):
 
@@ -490,7 +529,7 @@ python3 examples/demo.py
 python3 -m unittest discover tests
 ```
 
-89 tests, about three minutes. The blind test on new stories is `tests/test_unseen.py`. The rule for an honest test: the stories and the expected answers are written before the first run and never tuned afterwards. Once a story has been used to fix the parser, it is no longer blind; a new test needs new stories.
+106 tests, about two minutes (17 of them cover the "Mir" sandbox). The blind test on new stories is `tests/test_unseen.py`. The rule for an honest test: the stories and the expected answers are written before the first run and never tuned afterwards. Once a story has been used to fix the parser, it is no longer blind; a new test needs new stories.
 
 ### Honest limits
 
@@ -511,6 +550,7 @@ python3 -m unittest discover tests
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the "brain": attention stage and departments |
 | [docs/CORTEX.md](docs/CORTEX.md) | the cortex network |
 | [docs/SEMA.md](docs/SEMA.md) | the neural network of meanings |
+| [docs/MIR.md](docs/MIR.md) | the "Mir" sandbox: surprise tests, cortex versus a standard network, results |
 
 ### License
 

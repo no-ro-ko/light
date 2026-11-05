@@ -41,13 +41,22 @@ def pos_name(p: int) -> str:
     if p >= POOL4:
         return f"рядом по сторонам есть {NAMES[p - POOL4]}"
     if p == 25:
-        return "действие"
+        return "я делаю"
     if p == 26:
         return "метроном"
     dy, dx = OFFS[p]
     if (dy, dx) in POS_NAMES:
         return POS_NAMES[(dy, dx)]
     return f"({dy:+d},{dx:+d})"
+
+
+def cond_words(p: int, v: int, eq: bool) -> str:
+    """Условие «признак p равен v» (eq=True) или «не равен v» (eq=False) словами."""
+    if p >= POOL4:   # двоичные «рядом есть X»: значение 1 — есть, 0 — нет
+        present = (v == 1) == eq
+        return pos_name(p) if present else "НЕТ: " + pos_name(p)
+    val = NAMES[v] if p < 25 else (ACTION_NAMES_RU[v] if p == 25 else ("чёт" if v == 0 else "нечёт"))
+    return f"{pos_name(p)} {'=' if eq else '≠'} {val}"
 
 
 def _entropy(c: np.ndarray) -> np.ndarray:
@@ -367,19 +376,13 @@ class SegCortex:
                 "depth": int(max(self.depth)) if self.depth else 0}
 
     def rule_words(self, r: dict) -> str:
-        conds = []
-        for (p, v, eq) in r["cond"]:
-            if p >= POOL4:
-                conds.append(pos_name(p) if eq else f"НЕТ: {pos_name(p)}")
-            else:
-                val = NAMES[v] if p < 25 else (ACTION_NAMES_RU[v] if p == 25 else ("чёт" if v == 0 else "нечёт"))
-                conds.append(f"{pos_name(p)} {'=' if eq else '≠'} {val}")
+        conds = [cond_words(p, v, eq) for (p, v, eq) in r["cond"]]
         return (f"{NAMES[r['center']]} → {NAMES[r['label']]}  если " + (", ".join(conds) or "всегда") +
                 f"   [подтверждено {r['n_pos']} разными случаями, исключений {r['n_neg']}]")
 
-    def laws_text(self, top: int = 40) -> str:
-        """Общие правила после сна, самые подтверждённые сверху."""
-        rs = sorted(self.rules, key=lambda r: -r["n_pos"])
+    def laws_text(self, top: int = 40, centers=None) -> str:
+        """Общие правила после сна, самые подтверждённые сверху (centers — только для этих сортов центра)."""
+        rs = sorted((r for r in self.rules if centers is None or r["center"] in centers), key=lambda r: -r["n_pos"])
         return "\n".join(self.rule_words(r) for r in rs[:top])
 
     def rules_text(self, top: int = 40, min_weight: float = 3.0) -> str:
@@ -391,12 +394,8 @@ class SegCortex:
         def walk(node, path):
             if feat[node] >= 0:
                 p, v = int(feat[node]), int(val[node])
-                if p >= POOL4:
-                    label = pos_name(p)
-                else:
-                    label = (f"{pos_name(p)} = {NAMES[v] if p < 25 else (ACTION_NAMES_RU[v] if p == 25 else ('чёт' if v == 0 else 'нечёт'))}")
-                walk(yes[node], path + [label])
-                walk(no[node], path + [f"НЕ ({label})"])
+                walk(yes[node], path + [cond_words(p, v, True)])
+                walk(no[node], path + [cond_words(p, v, False)])
                 return
             mem = self.members.get(node)
             if mem is None or not len(mem):
